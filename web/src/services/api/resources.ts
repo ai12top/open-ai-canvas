@@ -302,7 +302,7 @@ async function uploadFileInChunks(file: Blob, name: string, kind: "image" | "vid
 async function runChunkedUpload(file: Blob, name: string, kind: "image" | "video" | "audio" | "file", meta: ResourceUploadMeta | undefined, onProgress?: (uploadedBytes: number, totalBytes: number) => void) {
     const session = await http.post<{ uploadId: string; chunkSize: number; chunkCount: number }>(
         "/resources/uploads",
-        { fileName: name, kind, size: file.size, width: meta?.width, height: meta?.height, durationMs: meta?.durationMs },
+        { fileName: name, kind, size: file.size, width: meta?.width, height: meta?.height, durationMs: meta?.durationMs, idempotencyKey: meta?.idempotencyKey?.trim() || undefined },
         uploadRequestConfig(meta?.idempotencyKey),
     );
     for (let index = 0; index < session.chunkCount; index++) {

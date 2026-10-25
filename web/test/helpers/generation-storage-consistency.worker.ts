@@ -23,6 +23,7 @@ function installStorageHarness() {
     const originalGetItem = localforage.getItem.bind(localforage);
     const originalSetItem = localforage.setItem.bind(localforage);
     const originalRemoveItem = localforage.removeItem.bind(localforage);
+    const originalIterate = localforage.iterate.bind(localforage);
     const originalWindow = (globalThis as { window?: unknown }).window;
     const originalNavigator = (globalThis as { navigator?: unknown }).navigator;
     const originalDocument = (globalThis as { document?: unknown }).document;
@@ -53,6 +54,14 @@ function installStorageHarness() {
     localforage.removeItem = (async (key: string) => {
         defaultValues.delete(key);
     }) as typeof localforage.removeItem;
+    localforage.iterate = (async (iterator: (value: unknown, key: string, iterationNumber: number) => unknown) => {
+        let index = 1;
+        for (const [key, value] of defaultValues) {
+            const result = iterator(value, key, index++);
+            if (result !== undefined) return result;
+        }
+        return undefined;
+    }) as typeof localforage.iterate;
     localforage.createInstance = ((options: { storeName?: string }) => {
         const storeName = options.storeName || "default";
         const values = storeValues(storeName);
@@ -139,6 +148,7 @@ function installStorageHarness() {
             localforage.getItem = originalGetItem;
             localforage.setItem = originalSetItem;
             localforage.removeItem = originalRemoveItem;
+            localforage.iterate = originalIterate;
             if (originalWindow === undefined) delete (globalThis as { window?: unknown }).window;
             else Object.defineProperty(globalThis, "window", { configurable: true, writable: true, value: originalWindow });
             if (originalNavigator === undefined) delete (globalThis as { navigator?: unknown }).navigator;
