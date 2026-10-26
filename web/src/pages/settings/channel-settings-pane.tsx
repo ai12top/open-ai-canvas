@@ -1,4 +1,3 @@
-import { assertPersonalOpenAIConfig } from "@/lib/personal-channel";
 import { App, Button, Form, Input, Popconfirm, Segmented, Tooltip } from "antd";
 import { Pencil, Plus, RefreshCw, Trash2, Workflow } from "lucide-react";
 import { useState, type ReactNode } from "react";
@@ -290,7 +289,6 @@ function WorkflowChannelEntry({ icon, title, description, status, ready, onOpen 
 }
 
 export function channelValidationError(channel: ModelChannel) {
-    if (channel.scope !== "system") { try { assertPersonalOpenAIConfig(channel); } catch (error) { return error instanceof Error ? error.message : "个人渠道协议不支持"; } }
     return channelConnectionError(channel) || validateChannelHeaders(channel.headers) || (!channel.models.length ? "请添加至少一个模型" : "");
 }
 

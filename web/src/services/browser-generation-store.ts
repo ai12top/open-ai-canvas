@@ -4,14 +4,16 @@ import { browserGenerationScope, assertBrowserGenerationScope } from "@/lib/brow
 import { withGenerationArtifactCommitLock } from "@/services/generation-asset-repository";
 import type { GenerationTask } from "@/services/api/task-center";
 import type { VideoGenerationTask } from "@/services/api/video";
+import type { BrowserPluginHandle } from "@/services/api/browser-plugin";
 
 export type BrowserGenerationRecord = {
     task: GenerationTask;
     channelId: string;
     baseUrl: string;
     protocol: string;
-    pendingMedia?: { mode: "image" | "audio"; sources: Array<string | Blob> };
+    pendingMedia?: { mode: "image" | "video" | "audio"; sources: Array<string | Blob> };
     video?: VideoGenerationTask;
+    pluginTask?: BrowserPluginHandle;
 };
 const prefix = "yingce:browser-generation:";
 export function isBrowserGenerationTask(id: string) { return id.startsWith("browser:"); }
@@ -58,7 +60,7 @@ export async function readBrowserGenerationMediaStorageKeys(scope: string): Prom
     for (const record of records) {
         if (record.task.resultJson) collect(JSON.parse(record.task.resultJson));
         if (record.pendingMedia) {
-            const kind = record.pendingMedia.mode === "image" ? "image" : "audio";
+            const kind = record.pendingMedia.mode;
             record.pendingMedia.sources.forEach((_source, index) => keys.add(`${kind}:${scope}:${record.task.id}:${index}`));
         }
         if (record.video && record.task.status !== "succeeded") keys.add(`video:${scope}:${record.task.id}:0`);

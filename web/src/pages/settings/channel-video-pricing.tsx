@@ -26,7 +26,7 @@ export function ChannelModelSettings({ channel, onChange }: { channel: ModelChan
 
     useEffect(() => {
         let active = true;
-        void fetchPluginProviderCatalog("user.custom-channel").then((items) => { if (active) setAvailableProtocols(items.filter((item) => PERSONAL_OPENAI_PROTOCOLS.has(item.value))); })
+        void fetchPluginProviderCatalog("user.custom-channel").then((items) => { if (active) setAvailableProtocols(items.filter((item) => PERSONAL_OPENAI_PROTOCOLS.has(item.value) || ((item.capability === "image" || item.capability === "video") && item.browserManifest))); })
             .catch((error) => { if (active) setProtocolError(error instanceof Error ? error.message : "协议目录读取失败"); })
             .finally(() => { if (active) setProtocolLoading(false); });
         return () => { active = false; };
@@ -71,7 +71,7 @@ export function ChannelModelSettings({ channel, onChange }: { channel: ModelChan
             <div className="mb-2 flex items-center justify-between gap-3">
                 <div>
                     <div className="text-xs font-medium">模型能力与请求协议</div>
-                    <div className="mt-0.5 text-[var(--fs-tiny)] text-foreground/42">个人渠道仅支持 OpenAI 兼容协议；测试会发起真实请求并可能产生供应商费用</div>
+                    <div className="mt-0.5 text-[var(--fs-tiny)] text-foreground/42">个人渠道支持 OpenAI 及可浏览器执行的图片／视频插件；测试会发起真实请求并可能产生供应商费用</div>
                 </div>
                 <span className="text-[var(--fs-tiny)] text-foreground/35">{channel.models.length} 个模型</span>
             </div>

@@ -29,6 +29,10 @@ type PluginProviderCatalogItem struct {
 	Parameters        []protocol.Parameter        `json:"parameters,omitempty"`
 	ImageParameters   []protocol.ImageParameter   `json:"imageParameters,omitempty"`
 	Workflows         []protocol.ManifestWorkflow `json:"workflows,omitempty"`
+	// BrowserManifest uses the existing manifest wire contract, not a second
+	// execution schema. Its presence declares protocol eligibility, not CORS.
+	BrowserManifest          *protocol.Manifest `json:"browserManifest,omitempty"`
+	BrowserUnsupportedReason string             `json:"browserUnsupportedReason,omitempty"`
 }
 
 // PluginProviderCatalog projects provider and workflow contributions from the
@@ -46,6 +50,20 @@ func (s *Service) PluginProviderCatalog(scope, capability string, includeUnavail
 			item.Create, item.Poll, item.ContentType = operationSummary(provider.Create), operationSummaryPtr(provider.Poll), provider.Create.ContentType
 			item.ImageParameters = provider.ImageParameters
 			item.Kind = provider.Kind
+			browserManifest, err := protocol.BrowserProviderManifest(protocol.Manifest{
+				APIVersion: plugin.Manifest.APIVersion,
+				Metadata: protocol.Metadata{
+					ID: plugin.Manifest.ID, Name: plugin.Manifest.Name,
+					Version: plugin.Manifest.Version, Vendor: plugin.Manifest.Author,
+					Enabled: item.Enabled && item.UnavailableReason == "",
+				},
+				Runtime: plugin.Manifest.Runtime, Contributes: plugin.Manifest.Contributes,
+			}, provider.ID)
+			if err != nil {
+				item.BrowserUnsupportedReason = err.Error()
+			} else {
+				item.BrowserManifest = &browserManifest
+			}
 			// The registry metadata is the canonical provider projection. This keeps
 			// host-backed dispatch paths out of every user-facing catalog consumer.
 			if adapter, ok := canonicalProviderAdapter(s.protocolRegistry(), provider.ID); ok {

@@ -1,7 +1,7 @@
 import { http } from "@/services/api/request";
 import type { ModelProtocolDefinition, ProtocolCapability } from "@/lib/model-protocols";
 
-type PluginProviderCatalogItem = {
+export type PluginProviderCatalogItem = {
     imageParameters?: import("@/lib/image-parameters").ImageParameter[];
     id: string;
     version: string;
@@ -15,6 +15,9 @@ type PluginProviderCatalogItem = {
     enabled: boolean;
     unavailableReason?: string;
     baseUrl?: string;
+    /** 浏览器可执行声明式插件的原始 manifest；仅表示协议资格，不代表上游 CORS 可达。 */
+    browserManifest?: Record<string, unknown>;
+    browserUnsupportedReason?: string;
     parameters?: Array<{
         name: string;
         type: string;
@@ -53,5 +56,7 @@ function toProviderDefinition(item: PluginProviderCatalogItem): ModelProtocolDef
         parameters: item.parameters || [],
         imageParameters: item.imageParameters,
         workflows: item.workflows || [],
+        browserManifest: item.browserManifest,
+        browserUnsupportedReason: item.browserUnsupportedReason,
     };
 }

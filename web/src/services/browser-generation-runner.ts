@@ -1,6 +1,8 @@
 import { scopedStorageKey } from "@/lib/user-scope";
 import { browserGenerationScope, assertBrowserGenerationScope } from "@/lib/browser-generation-session";
-import { assertPersonalOpenAIConfig } from "@/lib/personal-channel";
+import { assertPersonalOpenAIConfig, PERSONAL_OPENAI_PROTOCOLS } from "@/lib/personal-channel";
+import { resolveBrowserPlugin, createBrowserPluginTask, pollBrowserPluginTask, fetchBrowserPluginResult, pluginDownloadRequest, type BrowserPluginManifest, type BrowserPluginResult } from "@/services/api/browser-plugin";
+import { browserPluginRequest } from "./browser-plugin-request";
 import { resolveModelRequestConfig, useConfigStore, encodeChannelModel, modelOptionName } from "@/stores/use-config-store";
 import { requestGeneration, requestEdit, requestImageQuestion, type AiTextContentPart } from "@/services/api/image";
 import { requestAudioGeneration } from "@/services/api/audio";
@@ -19,15 +21,21 @@ export function isPersonalGeneration(options: Pick<BackendGenerationTaskOptions,
     if ((options.config.taskWorkflowProvider || "model") !== "model") return false;
     return resolveModelRequestConfig(options.config, options.config.model).channelScope === "user";
 }
-export function assertBrowserGenerationOptions(options: BackendGenerationTaskOptions) {
+/**
+ * 个人渠道的执行预检。插件判定只能来自 catalog（provider id 可能与内置协议重名），
+ * 所以这里异步：能拿到带 browserManifest 的同名项就是插件，否则按内置 OpenAI 协议。
+ */
+export async function resolveBrowserExecution(options: BackendGenerationTaskOptions): Promise<{ config: ReturnType<typeof resolveModelRequestConfig>; manifest?: BrowserPluginManifest }> {
     const config = resolveModelRequestConfig(options.config, options.config.model);
-    assertPersonalOpenAIConfig(config);
     if (options.metadata?.promptTemplateOperation || options.metadata?.shotId || options.metadata?.chapterOperation || options.metadata?.artifactType) throw new Error("此受管生产流程依赖服务端模板或镜头回填，请选择系统渠道");
     if (/@\[tool:/u.test(options.prompt)) throw new Error("个人渠道暂不支持服务端工具提示词，请先将工具提示词展开为文本");
+    if (!config.requestChannelId) throw new Error("请明确选择个人模型渠道");
+    const manifest = options.mode === "image" || options.mode === "video" ? await resolveBrowserPlugin(config, options.mode) : undefined;
+    if (manifest) return { config, manifest };
+    assertPersonalOpenAIConfig(config);
     if (options.referenceVideos?.length || options.referenceAudios?.length) throw new Error("标准 OpenAI 视频暂不支持参考视频或音频");
     if (options.mode === "video" && (options.referenceImages?.length || 0) > 1) throw new Error("标准 OpenAI 视频暂只支持一张参考图，请减少参考图后提交");
-    if (!config.requestChannelId) throw new Error("请明确选择个人模型渠道");
-    return config;
+    return { config };
 }
 function assertScope(scope: string, signal?: AbortSignal) {
     assertBrowserGenerationScope(scope, signal);
@@ -39,7 +47,7 @@ async function storeBlob(record: BrowserGenerationRecord, blob: Blob, kind: "ima
     return withGenerationArtifactCommitLock(scope, async () => {
         assertScope(scope);
         const key = `${kind}:${scope}:${record.task.id}:${index}`;
-        if (!blob.size || (blob.type && !blob.type.startsWith(`${kind}/`))) throw new Error("生成结果不是有效媒体文件");
+        if (!blob.size || (blob.type && blob.type !== "application/octet-stream" && !blob.type.startsWith(`${kind}/`))) throw new Error("生成结果不是有效媒体文件");
         // pendingMedia/video is already durable and keeps this key alive until resultJson is committed.
         if (kind === "image") await setImageBlob(key, blob); else await setMediaBlob(key, blob);
         const stored = kind === "image" ? await import("@/services/image-storage").then((module) => module.getImageBlob(key)) : await getMediaBlob(key);
@@ -48,11 +56,11 @@ async function storeBlob(record: BrowserGenerationRecord, blob: Blob, kind: "ima
         return { dataUrl: "", storageKey: key, bytes: blob.size, mimeType: blob.type };
     }, { requireCrossRealmLock: true });
 }
-function currentRecordConfig(record: Pick<BrowserGenerationRecord, "channelId" | "baseUrl" | "protocol"> & { task: Pick<GenerationTask, "model"> }) {
+function currentRecordConfig(record: Pick<BrowserGenerationRecord, "channelId" | "baseUrl" | "protocol"> & { task: Pick<GenerationTask, "model">; pluginTask?: BrowserGenerationRecord["pluginTask"] }, plugin = Boolean(record.pluginTask)) {
     if (!record.task.model) throw new Error("原任务缺少模型标识，无法安全恢复");
     const current = useConfigStore.getState().config;
     const config = resolveModelRequestConfig(current, encodeChannelModel(record.channelId, modelOptionName(record.task.model)));
-    assertPersonalOpenAIConfig(config);
+    if (!plugin) assertPersonalOpenAIConfig(config);
     if (config.channelScope !== "user" || config.requestChannelId !== record.channelId || config.baseUrl !== record.baseUrl || (config.interfaceType || "") !== record.protocol) throw new Error("原渠道已变更，请恢复原渠道后继续查询");
     return config;
 }
@@ -60,7 +68,8 @@ async function resultBlob(url: string, record: BrowserGenerationRecord, signal?:
     let headers: Record<string, string> | undefined;
     if (/^https?:/i.test(url) && new URL(url).origin === new URL(record.baseUrl).origin) {
         // Files served by the provider itself may require the same bearer key; never send it to a CDN.
-        headers = channelRequest(currentRecordConfig(record), url).headers;
+        const config = currentRecordConfig(record);
+        headers = record.pluginTask ? pluginDownloadRequest(config, record.pluginTask.manifest, url).headers : channelRequest(config, url).headers;
     }
     const response = await fetch(url, { headers, credentials: "omit", signal });
     if (!response.ok) throw new Error("生成文件下载失败，请恢复下载，不要重新生成");
@@ -68,13 +77,15 @@ async function resultBlob(url: string, record: BrowserGenerationRecord, signal?:
 }
 async function finish(record: BrowserGenerationRecord, result: BackendGenerationResult, scope: string) {
     delete record.pendingMedia;
+    // 完成即丢弃插件句柄，本地记录不再保留参考素材与请求快照。
+    delete record.pluginTask;
     record.task = { ...record.task, status: "succeeded", canRecoverMedia: false, progress: 100, stage: "completed", resultJson: JSON.stringify(result), completedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), error: undefined };
     await writeBrowserGeneration(record, scope);
 }
 async function savePendingMedia(record: BrowserGenerationRecord, scope: string, signal?: AbortSignal) {
     const pending = record.pendingMedia;
     if (!pending) throw new Error("缺少生成结果，不能重新提交");
-    const kind = pending.mode === "image" ? "image" : "audio";
+    const kind = pending.mode;
     const items = [];
     for (const [index, source] of pending.sources.entries()) {
         assertScope(scope, signal);
@@ -84,7 +95,53 @@ async function savePendingMedia(record: BrowserGenerationRecord, scope: string, 
         items.push(await storeBlob(record, blob, kind, index, scope));
     }
     if (pending.mode === "image") await finish(record, { mode: "image", images: items }, scope);
+    else if (pending.mode === "video") await finish(record, { mode: "video", video: items[0] }, scope);
     else await finish(record, { mode: "audio", audio: items[0] }, scope);
+}
+async function acceptPluginResult(record: BrowserGenerationRecord, state: BrowserPluginResult, scope: string, signal?: AbortSignal) {
+    assertScope(scope, signal);
+    if (state.taskId && record.pluginTask) record.pluginTask.taskId = state.taskId;
+    record.task.providerRequestId = record.pluginTask?.taskId;
+    // Persist the receipt before any download, including synchronously completed tasks.
+    record.task.stage = "submitted";
+    await writeBrowserGeneration(record, scope);
+    if (state.status === "failed" || state.status === "cancelled") throw new Error(state.message || "上游插件任务失败");
+    if (state.status !== "succeeded") {
+        if (!record.pluginTask?.taskId) throw new Error("插件未返回任务句柄，不能恢复或重新提交");
+        return false;
+    }
+    const mode = record.task.operation === "image" ? "image" : "video";
+    let result = state.result;
+    let media = mode === "image" ? result?.images : result?.videos?.slice(0, 1);
+    if (!media?.length && record.pluginTask) {
+        result = (await fetchBrowserPluginResult(currentRecordConfig(record), record.pluginTask, signal)).result;
+        assertScope(scope, signal);
+        media = mode === "image" ? result?.images : result?.videos?.slice(0, 1);
+    }
+    if (!media?.length) throw new Error("插件未返回可下载的生成结果，请继续查询原任务");
+    record.pendingMedia = { mode, sources: media.map((item) => {
+        const source = item.dataUrl || item.url;
+        if (!source) throw new Error("插件返回了空媒体地址");
+        return /^(data:|blob:|https?:)/iu.test(source) ? source : new URL(source, record.baseUrl).toString();
+    }) };
+    await writeBrowserGeneration(record, scope);
+    await savePendingMedia(record, scope, signal);
+    return true;
+}
+async function waitForNextPoll(signal: AbortSignal) {
+    await new Promise<void>((resolve, reject) => {
+        const abort = () => { clearTimeout(timer); reject(new DOMException("Aborted", "AbortError")); };
+        const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, 2500);
+        signal.addEventListener("abort", abort, { once: true });
+    });
+}
+async function pollPlugin(record: BrowserGenerationRecord, config: ReturnType<typeof resolveModelRequestConfig>, scope: string, signal: AbortSignal) {
+    for (let attempt = 0; attempt < 360; attempt++) {
+        assertScope(scope, signal);
+        if (await acceptPluginResult(record, await pollBrowserPluginTask(config, record.pluginTask!, signal), scope, signal)) return;
+        await waitForNextPoll(signal);
+    }
+    throw new Error("插件任务仍未完成；可继续查询原任务，请勿重新生成");
 }
 async function pollVideo(record: BrowserGenerationRecord, config: ReturnType<typeof resolveModelRequestConfig>, scope: string, signal: AbortSignal) {
     if (!record.video) throw new Error("视频任务缺少上游句柄");
@@ -99,24 +156,20 @@ async function pollVideo(record: BrowserGenerationRecord, config: ReturnType<typ
             await finish(record, { mode: "video", video }, scope);
             return;
         }
-        await new Promise<void>((resolve, reject) => {
-            const abort = () => { clearTimeout(timer); reject(new DOMException("Aborted", "AbortError")); };
-            const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, 2500);
-            signal.addEventListener("abort", abort, { once: true });
-        });
+        await waitForNextPoll(signal);
     }
     throw new Error("视频仍未完成；可继续查询原任务，请勿重新生成");
 }
 async function fail(record: BrowserGenerationRecord, error: unknown, scope: string) {
-    const recoverable = Boolean(record.video || record.pendingMedia);
+    const recoverable = Boolean(record.video || record.pendingMedia || record.pluginTask?.taskId);
     record.task = { ...record.task, status: "failed", canRecoverMedia: recoverable, stage: recoverable ? "query_paused" : "submission_unknown", error: `${recoverable ? "查询或文件保存暂停，可继续恢复原结果" : "提交结果未知，禁止自动重发，请核对上游记录"}。${error instanceof Error ? error.message : "连接已中断"}`, updatedAt: new Date().toISOString() };
     await writeBrowserGeneration(record, scope);
 }
 export async function submitBrowserGeneration(options: BackendGenerationTaskOptions): Promise<GenerationTask> {
-    const config = assertBrowserGenerationOptions(options);
+    const { config, manifest } = await resolveBrowserExecution(options);
     const scope = browserGenerationScope();
     assertScope(scope, options.signal);
-    const live = currentRecordConfig({ task: { model: config.model }, channelId: config.requestChannelId!, baseUrl: config.baseUrl, protocol: config.interfaceType || "" });
+    const live = currentRecordConfig({ task: { model: config.model }, channelId: config.requestChannelId!, baseUrl: config.baseUrl, protocol: config.interfaceType || "" }, Boolean(manifest));
     if (live.apiKey !== config.apiKey || JSON.stringify(live.headers || []) !== JSON.stringify(config.headers || [])) throw new Error("个人渠道配置已变更，请刷新页面后重新选择渠道");
     const operation = options.clientOperationId || crypto.randomUUID();
     const id = `browser:${operation}`;
@@ -152,6 +205,16 @@ export async function submitBrowserGeneration(options: BackendGenerationTaskOpti
         void browserGenerationLock(id, async () => {
             try {
                 assertScope(scope, controller.signal);
+                if (manifest) {
+                    const request = await browserPluginRequest(options);
+                    assertScope(scope, controller.signal);
+                    record.pluginTask = { manifest, request, taskId: "" };
+                    // 先落盘再发请求：POST 已经发出时刷新页面仍能认出上游句柄存在。
+                    await writeBrowserGeneration(record, scope);
+                    const state = await createBrowserPluginTask(config, manifest, request, controller.signal);
+                    if (!await acceptPluginResult(record, state, scope, controller.signal)) await pollPlugin(record, config, scope, controller.signal);
+                    return;
+                }
                 const references = await Promise.all((options.referenceImages || []).map(async (image) => ({ ...image, storageKey: undefined, url: undefined, dataUrl: await imageToDataUrl(image) })));
                 const mask = options.mask ? { ...options.mask, storageKey: undefined, url: undefined, dataUrl: await imageToDataUrl(options.mask) } : undefined;
                 assertScope(scope, controller.signal);
@@ -178,7 +241,11 @@ export async function submitBrowserGeneration(options: BackendGenerationTaskOpti
                 }
             } catch (error) { await fail(record, error, scope); }
             finally { running.delete(scopedStorageKey(id, scope)); }
-        }, scope).catch((error) => { console.error("本机生成记录保存失败", error); });
+        }, scope).catch(async (error) => {
+            console.error("本机生成记录保存失败", error);
+            // 写盘本身出错时再试一次，让记录停在「提交结果未知」而不是「执行页面已关闭」。
+            try { await fail(record, error, scope); } catch { /* 存储仍不可用时无可落盘 */ }
+        });
     }
     return record.task;
 }
@@ -206,7 +273,7 @@ export async function queryBrowserGeneration(id: string, options?: { signal?: Ab
         }, scope);
         return (await readBrowserGeneration(id, scope)).task;
     }
-    if (!record.video) {
+    if (!record.video && !record.pluginTask?.taskId) {
         if (record.task.status === "running" || record.task.status === "queued") await fail(record, new Error("执行页面已关闭，无法判断同步请求是否完成"), scope);
         return record.task;
     }
@@ -217,6 +284,14 @@ export async function queryBrowserGeneration(id: string, options?: { signal?: Ab
         try {
             const config = currentRecordConfig(latest);
             assertScope(scope, options?.signal);
+            if (latest.pluginTask?.taskId) {
+                const completed = await acceptPluginResult(latest, await pollBrowserPluginTask(config, latest.pluginTask, options?.signal), scope, options?.signal);
+                if (!completed) {
+                    latest.task.status = "running"; latest.task.error = undefined;
+                    await writeBrowserGeneration(latest, scope);
+                }
+                return;
+            }
             const state = await pollVideoGenerationTask(config, latest.video!, options);
             assertScope(scope, options?.signal);
             if (state.status === "failed") throw new Error(state.error);

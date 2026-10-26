@@ -99,7 +99,7 @@ cd web && bun run dev
 ### 模型渠道和流式请求
 
 - 自定义渠道 URL/Header 仍由 `custom-channel-relay.ts` 的 `channelRequest` 解析；实际发出走 `channel-transport.ts` 的 `createChannelTransport`。image / video / audio 只组协议 payload，不再各自 `axios + channelRequest`。
-- 按选中渠道 scope 分流：系统渠道保留登录态后端 `/api/ai/custom` 与任务流程；个人渠道仅 OpenAI 兼容协议由浏览器直连，不支持的协议明确拒绝。个人请求与密钥不经影策后端，不携带影策 Cookie 或转发头，不将第三方密钥放入 URL；系统转发仍清除 `x-goog-api-key` 和旧的 `X-Canvas-Upstream-Headers`。
+- 按选中渠道 scope 分流：系统渠道保留登录态后端 `/api/ai/custom` 与任务流程；个人渠道的 OpenAI 兼容协议与浏览器可执行的声明式图片/视频插件由浏览器直连；插件是否可执行只看 catalog 里的 `browserManifest`（同名时优先于内置协议），插件复用后端 Go 协议转换核心及同一份 manifest，不支持的执行能力明确拒绝。个人请求与密钥不经影策后端，不携带影策 Cookie 或转发头，不将第三方密钥放入 URL；系统转发仍清除 `x-goog-api-key` 和旧的 `X-Canvas-Upstream-Headers`。
 - Provider 特有 payload、响应解包和状态机留在对应 `image.ts`、`video.ts`、`audio.ts`；不要塞进通用 `request.ts`。
 - 原始 `fetch` 仅用于媒体 blob/data URL、资源、Worker 或 SSE；必须检查 `response.ok`，传递正确的 `credentials` 和 `signal`。
 - 文本任务 SSE 是 `GET /api/tasks/:id/text-events`，游标是递增事件 `id`；断线使用 `Last-Event-ID` 或 `?after=`，不能把任务 ID 当游标。
