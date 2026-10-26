@@ -9,6 +9,8 @@ import { readBrowserGeneration, writeBrowserGeneration, type BrowserGenerationRe
 import { resolveBrowserExecution, queryBrowserGeneration, submitBrowserGeneration } from "../src/services/browser-generation-runner";
 
 const originalFetch = globalThis.fetch;
+const originalBridge = globalThis.yingceBrowserProtocol;
+const fixtureManifest = { id: "fixture", contributes: { providers: [{ id: "fixture" }] } } as browserPlugin.BrowserPluginManifest;
 const originalUser = useUserStore.getState();
 const originalConfig = useConfigStore.getState().config;
 const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
@@ -32,6 +34,13 @@ function pluginConfig(channel: ReturnType<typeof pluginChannel>, model: string) 
 }
 
 beforeEach(() => {
+    // Runner tests fake protocol translation; the real WASM contract has a separate offline check.
+    globalThis.yingceBrowserProtocol = (input) => {
+        const call = JSON.parse(input);
+        if (call.op === "normalizeImage") return JSON.stringify({ ok: true, data: call.request });
+        if (call.op === "prepareHTTP") return JSON.stringify({ ok: true, data: { headers: [{ name: "Authorization", value: `Bearer ${call.credentials.apiKey}` }] } });
+        return JSON.stringify({ ok: false, error: `unexpected op ${call.op}` });
+    };
     records = new Map();
     blobs = new Map();
     restores = [
@@ -56,6 +65,7 @@ afterEach(() => {
     useUserStore.setState(originalUser);
     useConfigStore.setState({ config: originalConfig });
     globalThis.fetch = originalFetch;
+    globalThis.yingceBrowserProtocol = originalBridge;
     if (originalNavigator) Object.defineProperty(globalThis, "navigator", originalNavigator); else Reflect.deleteProperty(globalThis, "navigator");
 });
 
@@ -78,7 +88,7 @@ function setConfig(config: ReturnType<typeof defaultConfig>) {
 /** Real plugin paths, minus the network: only the shared transport/download boundary is faked. */
 function stubPlugin(create: browserPlugin.BrowserPluginResult, poll?: browserPlugin.BrowserPluginResult[]) {
     const calls = { load: 0, create: 0, poll: 0, result: 0 };
-    restores.push(spyOn(browserPlugin, "resolveBrowserPlugin").mockImplementation(async () => { calls.load++; return { id: "fixture" } as browserPlugin.BrowserPluginManifest; }));
+    restores.push(spyOn(browserPlugin, "resolveBrowserPlugin").mockImplementation(async () => { calls.load++; return fixtureManifest; }));
     restores.push(spyOn(browserPlugin, "createBrowserPluginTask").mockImplementation(async () => { calls.create++; return create; }));
     const queue = [...(poll || [])];
     restores.push(spyOn(browserPlugin, "pollBrowserPluginTask").mockImplementation(async () => { calls.poll++; return queue.length > 1 ? queue.shift()! : queue[0]; }));
@@ -172,7 +182,7 @@ test("a paused plugin record resumes from the persisted handle and never re-crea
     await writeBrowserGeneration({
         task: { id, executionSource: "browser", clientOperationId: "plugin-paused", type: "canvas_image", operation: "image", prompt: "A tree", model: "libtv-image::libtv/lib-image-2.5-s", status: "failed", stage: "query_paused", attempts: 1, createdAt: now, updatedAt: now },
         channelId: "libtv-image", baseUrl: "https://gw.example.com/v1", protocol: "libtv-image",
-        pluginTask: { manifest: { id: "fixture" } as browserPlugin.BrowserPluginManifest, request: {}, taskId: "up-async" },
+        pluginTask: { manifest: fixtureManifest, request: {}, taskId: "up-async" },
     });
     expect((await queryBrowserGeneration(id)).status).toBe("succeeded");
     expect(calls.create).toBe(0);

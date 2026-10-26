@@ -9,15 +9,19 @@ import (
 )
 
 type bridgeCall struct {
-	Op         string                     `json:"op"`
-	Manifest   protocol.Manifest          `json:"manifest"`
-	ProviderID string                     `json:"providerId"`
-	BaseURL    string                     `json:"baseUrl"`
-	Request    protocol.GenerationRequest `json:"request"`
-	Model      string                     `json:"model"`
-	TaskID     string                     `json:"taskId"`
-	Metadata   map[string]any             `json:"metadata"`
-	Body       json.RawMessage            `json:"body"`
+	Op          string                         `json:"op"`
+	Manifest    protocol.Manifest              `json:"manifest"`
+	ProviderID  string                         `json:"providerId"`
+	BaseURL     string                         `json:"baseUrl"`
+	Request     protocol.GenerationRequest     `json:"request"`
+	Model       string                         `json:"model"`
+	TaskID      string                         `json:"taskId"`
+	Metadata    map[string]any                 `json:"metadata"`
+	Body        json.RawMessage                `json:"body"`
+	ImageSize   *protocol.ImageSizeDeclaration `json:"imageSize,omitempty"`
+	Spec        protocol.RequestSpec           `json:"spec"`
+	Credentials protocol.Credentials           `json:"credentials"`
+	APIFormat   string                         `json:"apiFormat"`
 }
 
 type bridgeReply struct {
@@ -55,6 +59,12 @@ func encodeReply(data any, err error) string {
 }
 
 func execute(call bridgeCall) (any, error) {
+	if call.Op == "normalizeImage" {
+		if call.ImageSize == nil {
+			return call.Request, nil
+		}
+		return protocol.NormalizeImageRequest(call.Request, *call.ImageSize)
+	}
 	manifest, err := protocol.BrowserProviderManifest(call.Manifest, call.ProviderID)
 	if err != nil {
 		return nil, fmt.Errorf("load browser provider: %w", err)
@@ -76,6 +86,8 @@ func execute(call bridgeCall) (any, error) {
 	}
 	poll := protocol.PollContext{BaseURL: call.BaseURL, Model: model, Request: call.Request, TaskID: call.TaskID, Metadata: call.Metadata}
 	switch call.Op {
+	case "prepareHTTP":
+		return prepareHTTP(call, provider.Auth)
 	case "load", "describe":
 		return struct {
 			ProviderID string            `json:"providerId"`

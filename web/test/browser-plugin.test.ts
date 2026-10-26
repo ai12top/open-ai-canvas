@@ -45,6 +45,7 @@ function bridgeReplies(replies: Record<string, unknown>) {
     globalThis.yingceBrowserProtocol = (input: string) => {
         const call = JSON.parse(input) as BridgeCall;
         const op = String(call.op);
+        if (op === "prepareHTTP" && !(op in replies)) return JSON.stringify({ ok: true, data: { headers: [{ name: "Authorization", value: "Bearer sk-live" }] } });
         if (!(op in replies)) return JSON.stringify({ ok: false, error: `unexpected op ${op}` });
         return JSON.stringify({ ok: true, data: replies[op] });
     };
@@ -93,15 +94,18 @@ describe("browser plugin catalog and manifest loading", () => {
         await expect(resolveBrowserPlugin({ ...config, interfaceType: "other-provider" }, "image")).rejects.toThrow("未提供图片能力");
     });
 
-    test("keeps the built-in OpenAI protocol when the catalog cannot be read", async () => {
+    test("reports catalog errors even for built-in protocol names", async () => {
         apiClient.request = (async () => { throw new Error("catalog unreachable"); }) as typeof apiClient.request;
-        await expect(resolveBrowserPlugin({ ...config, interfaceType: "openai-image" }, "image")).resolves.toBeUndefined();
+        await expect(resolveBrowserPlugin({ ...config, interfaceType: "openai-image" }, "image")).rejects.toThrow("catalog unreachable");
     });
 
-    test("falls back to the built-in protocol when the same-name provider is not browser executable", async () => {
-        // 刻意取舍：同名条目只给了 browserUnsupportedReason 时不抢内置协议，避免把既有 OpenAI 渠道整个打断；
-        // 插件不可执行的提示因此只在非同名插件上出现。
+    test("rejects a same-name provider explicitly marked unsupported", async () => {
         stubCatalog({ id: "openai-image", browserUnsupportedReason: 'browser execution does not support auth "sigv4"' });
+        await expect(resolveBrowserPlugin({ ...config, interfaceType: "openai-image" }, "image")).rejects.toThrow("browser execution does not support auth");
+    });
+
+    test("keeps legacy built-in support only when the catalog confirms no same-name plugin", async () => {
+        stubCatalog({ browserManifest: manifest });
         await expect(resolveBrowserPlugin({ ...config, interfaceType: "openai-image" }, "image")).resolves.toBeUndefined();
     });
 
@@ -145,6 +149,7 @@ describe("browser plugin task execution", () => {
         bridgeReplies({
             buildPoll: { method: "GET", path: "/v1/tasks/task-9", query: { cursor: ["a", "b"] }, auth: { type: "header", header: "x-api-key", prefix: "Token " } },
             parsePoll: { status: "processing" },
+            prepareHTTP: { headers: [{ name: "x-api-key", value: "Token sk-live" }] },
         });
         const calls = stubAxios({ data: { state: "running" } });
         const handle: BrowserPluginHandle = { manifest, request: { model: "gw-image-1" }, taskId: "task-9" };
@@ -181,6 +186,7 @@ describe("browser plugin task execution", () => {
                 files: [{ name: "image", reference: { dataUrl: "data:image/png;base64,cG5n", name: "ref.png", mimeType: "image/png" } }],
             },
             parseCreate: { taskId: "task-1", status: "processing" },
+            prepareHTTP: { headers: [{ name: "Authorization", value: "Bearer sk-live" }], formValues: [{ name: "model", value: "gw-image-1" }] },
         });
         const calls = stubAxios({ data: { accepted: true } });
         globalThis.fetch = (async () => new Response(new Blob([new Uint8Array([1, 2, 3])], { type: "image/png" }), { status: 200 })) as typeof fetch;
@@ -203,13 +209,14 @@ describe("browser plugin task execution", () => {
 });
 
 describe("browser plugin media download", () => {
-    test("applies manifest auth only on the selected channel origin", () => {
-        const sameOrigin = pluginDownloadRequest(config, manifest, "https://gw.example.com/v1/files/a.png");
+    test("applies manifest auth only on the selected channel origin", async () => {
+        bridgeReplies({});
+        const sameOrigin = await pluginDownloadRequest(config, manifest, "https://gw.example.com/v1/files/a.png");
         expect(sameOrigin).toMatchObject({ credentials: "omit", headers: { authorization: "Bearer sk-live" } });
-        const thirdParty = pluginDownloadRequest(config, manifest, "https://cdn.example.com/a.png");
+        const thirdParty = await pluginDownloadRequest(config, manifest, "https://cdn.example.com/a.png");
         expect(thirdParty).toEqual({ url: "https://cdn.example.com/a.png", headers: {}, credentials: "omit" });
         // 同源但超出渠道路径：仍然是用户选中的主机，只借用鉴权头，不重定向。
-        const outsideScope = pluginDownloadRequest(config, manifest, "https://gw.example.com/other/a.png");
+        const outsideScope = await pluginDownloadRequest(config, manifest, "https://gw.example.com/other/a.png");
         expect(outsideScope).toMatchObject({ url: "https://gw.example.com/other/a.png", credentials: "omit", headers: { authorization: "Bearer sk-live" } });
     });
 });
@@ -244,11 +251,12 @@ describe("browser plugin result binaries", () => {
         globalThis.yingceBrowserProtocol = (input: string) => {
             const call = JSON.parse(input) as BridgeCall;
             sent.push(String(call.op));
+            if (call.op === "prepareHTTP") return JSON.stringify({ ok: true, data: { headers: [{ name: "Authorization", value: "Bearer sk-live" }] } });
             if (call.op !== "buildResult") return JSON.stringify({ ok: false, error: `unexpected op ${String(call.op)}` });
             return JSON.stringify({ ok: true, data: { method: "GET", path: "/v1/files/task-7", headers: { "x-result": "1" }, auth: { type: "bearer" } } });
         };
-        const axiosCalls = stubAxios();
-        const fetchCalls = stubFetch(new Blob([new Uint8Array([1, 2, 3])], { type: "image/png" }));
+        const axiosCalls = stubAxios({ data: new Blob([new Uint8Array([1, 2, 3])], { type: "image/png" }) });
+        const fetchCalls = stubFetch(new Blob());
 
         const result = await fetchBrowserPluginResult(config, { manifest: mediaManifest, request: { capability: "image", model: "gw-image-1" }, taskId: "task-7" });
 
@@ -256,17 +264,15 @@ describe("browser plugin result binaries", () => {
         expect(result.taskId).toBe("task-7");
         expect(result.result?.images?.[0]).toMatchObject({ kind: "image", role: "output", mimeType: "image/png" });
         expect(result.result?.images?.[0]?.dataUrl).toStartWith("data:image/png;base64,");
-        expect(sent).toEqual(["buildResult"]);
-        expect(axiosCalls).toHaveLength(0);
-        expect(fetchCalls).toHaveLength(1);
-        expect(fetchCalls[0]?.url).toBe("https://gw.example.com/v1/files/task-7");
-        expect(fetchCalls[0]?.init).toMatchObject({ method: "GET", credentials: "omit" });
-        expect(fetchCalls[0]?.init.headers).toMatchObject({ authorization: "Bearer sk-live", "x-result": "1" });
+        expect(sent).toEqual(["buildResult", "prepareHTTP"]);
+        expect(axiosCalls).toHaveLength(1);
+        expect(fetchCalls).toHaveLength(0);
+        expect(axiosCalls[0]).toMatchObject({ method: "get", url: "https://gw.example.com/v1/files/task-7", withCredentials: false, responseType: "blob", headers: { authorization: "Bearer sk-live", "x-result": "1" } });
     });
 
     test("projects video results into videos and keeps the declared content type", async () => {
         bridgeReplies({ buildResult: { method: "GET", path: "/v1/files/task-8", auth: { type: "bearer" } } });
-        stubFetch(new Blob([new Uint8Array([9])]), 200, "video/mp4");
+        stubAxios({ data: new Blob([new Uint8Array([9])], { type: "video/mp4" }) });
 
         const result = await fetchBrowserPluginResult(config, { manifest: mediaManifest, request: { capability: "video", model: "gw-video-1" }, taskId: "task-8" });
 
@@ -276,8 +282,8 @@ describe("browser plugin result binaries", () => {
 
     test("throws the original download failure instead of returning an empty success", async () => {
         bridgeReplies({ buildResult: { method: "GET", path: "/v1/files/task-9", auth: { type: "bearer" } } });
-        stubFetch(new Blob([new Uint8Array([0])]), 502, "text/plain");
-        await expect(fetchBrowserPluginResult(config, { manifest: mediaManifest, request: { capability: "image" }, taskId: "task-9" })).rejects.toThrow("插件结果下载失败（HTTP 502）");
+        axios.request = (async () => { throw new Error("upstream unavailable (HTTP 502)"); }) as typeof axios.request;
+        await expect(fetchBrowserPluginResult(config, { manifest: mediaManifest, request: { capability: "image" }, taskId: "task-9" })).rejects.toThrow("upstream unavailable (HTTP 502)");
     });
 
     test("requires a declared result operation and an upstream task id", async () => {
@@ -294,6 +300,7 @@ describe("browser plugin result binaries", () => {
                 buildResult += 1;
                 return JSON.stringify({ ok: false, error: "should not download during create" });
             }
+            if (op === "prepareHTTP") return JSON.stringify({ ok: true, data: { headers: [] } });
             if (op === "buildCreate") return JSON.stringify({ ok: true, data: { method: "POST", path: "/v1/tasks", contentType: "application/json", body: {} } });
             if (op === "parseCreate") return JSON.stringify({ ok: true, data: { taskId: "task-1", status: "succeeded" } });
             return JSON.stringify({ ok: false, error: `unexpected op ${op}` });
@@ -309,11 +316,11 @@ describe("browser plugin result binaries", () => {
 
     test("originPath result endpoints leave the channel prefix boundary without widening the default guard", async () => {
         bridgeReplies({ buildResult: { method: "GET", path: "/api/files/task-5", originPath: true, auth: { type: "bearer" } } });
-        const fetchCalls = stubFetch(new Blob([new Uint8Array([5])], { type: "image/webp" }));
+        const calls = stubAxios({ data: new Blob([new Uint8Array([5])], { type: "image/webp" }) });
 
         const result = await fetchBrowserPluginResult(config, { manifest: mediaManifest, request: { capability: "image" }, taskId: "task-5" });
 
-        expect(fetchCalls[0]?.url).toBe("https://gw.example.com/api/files/task-5");
+        expect(calls[0]?.url).toBe("https://gw.example.com/api/files/task-5");
         expect(result.result?.images?.[0]?.mimeType).toBe("image/webp");
         // 默认 guard 未被放宽：非声明式插件请求仍然只能落在所选 Base 路径内。
         expect(() => channelRequest({ ...config, interfaceType: "openai-image" }, "https://gw.example.com/api/files/task-5")).toThrow("请求地址超出所选个人渠道范围");

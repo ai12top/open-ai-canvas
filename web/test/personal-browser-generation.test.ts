@@ -3,6 +3,7 @@ import axios from "axios";
 import localforage from "localforage";
 import { useUserStore } from "../src/stores/use-user-store";
 import * as userScope from "../src/lib/user-scope";
+import * as pluginCatalog from "../src/services/api/plugin-catalog";
 import * as imageStorage from "../src/services/image-storage";
 import { channelRequest } from "../src/services/api/custom-channel-relay";
 import { fetchChannelModels } from "../src/services/api/image-models";
@@ -139,6 +140,7 @@ test("local task enumeration is scoped; refreshing a video reads its original ha
 
 test("image receipt survives download failure; recovery never resubmits generation", async () => {
     const blobs = new Map<string, Blob>();
+    restores.push(spyOn(pluginCatalog, "fetchPluginProviderCatalog").mockResolvedValue([]));
     restores.push(spyOn(imageStorage, "setImageBlob").mockImplementation(async (key, blob) => { blobs.set(key, blob); return "blob:mock"; }));
     restores.push(spyOn(imageStorage, "getImageBlob").mockImplementation(async (key) => blobs.get(key) || null));
     const imageConfig = { ...config, channels: [{ ...channel, interfaceType: "openai-image" }] };

@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"yingce/backend/internal/model"
+	"yingce/backend/internal/protocol"
 )
 
 func validateTextCapabilityConfig(value *TextCapabilityConfig) error {
@@ -577,115 +578,41 @@ func imageSizeValueForDeclaredPreset(profile *ImageCapabilityConfig, size string
 // 会把画布比例换算成 preset 像素值（OpenAI Images 只收 WIDTHxHEIGHT），换算结果必须继续
 // 通过同一套尺寸与分辨率校验。只认当前档位的 preset，避免用低档价格取到高档像素。
 func imageSizeRatioForDeclaredPreset(profile *ImageCapabilityConfig, size string, quality string) string {
-	if profile == nil {
-		return ""
-	}
-	value := strings.TrimSpace(size)
-	if value == "" || !strings.ContainsAny(value, "xX") {
-		return ""
-	}
-	if preset, ok := declaredImageSizePreset(profile.Size.Presets, value, imagePresetSelectionTier(profile, quality), imagePresetDefaultTier(profile)); ok {
-		return strings.TrimSpace(preset.Ratio)
-	}
-	return ""
+	return imageSizeDeclarationOf(profile, "").RatioForSize(size, quality)
 }
 
 func declaredImageSizePreset(presets []ImageSizePreset, value string, quality string, fallbackQuality string) (ImageSizePreset, bool) {
-	value = strings.TrimSpace(value)
-	if value == "" || strings.EqualFold(value, "auto") {
+	declaration := make([]protocol.ImageSizePreset, 0, len(presets))
+	for _, preset := range presets {
+		declaration = append(declaration, protocol.ImageSizePreset{Tier: preset.Tier, Ratio: preset.Ratio, Size: preset.Size})
+	}
+	index := protocol.ImageSizePresetIndex(declaration, value, quality, fallbackQuality)
+	if index < 0 {
 		return ImageSizePreset{}, false
 	}
-	tier := strings.TrimSpace(quality)
-	if tier == "" {
-		tier = strings.TrimSpace(fallbackQuality)
-	}
-	ratio := ""
-	if strings.Contains(value, ":") {
-		ratio = normalizeDeclaredImageRatio(value)
-	}
-	for _, preset := range presets {
-		if tier != "" && !strings.EqualFold(strings.TrimSpace(preset.Tier), tier) {
-			continue
-		}
-		if (ratio != "" && normalizeDeclaredImageRatio(preset.Ratio) == ratio) || strings.EqualFold(strings.TrimSpace(preset.Size), value) {
-			return preset, true
-		}
-	}
-	return ImageSizePreset{}, false
+	return presets[index], true
 }
 
 func normalizeDeclaredImageRatio(value string) string {
-	ratio := normalizeImageAspectRatio(value)
-	left, right, found := strings.Cut(ratio, ":")
-	if !found {
-		return ratio
-	}
-	width, widthErr := strconv.Atoi(left)
-	height, heightErr := strconv.Atoi(right)
-	if widthErr != nil || heightErr != nil || width <= 0 || height <= 0 {
-		return ratio
-	}
-	divisor := imageDimensionGCD(width, height)
-	return strconv.Itoa(width/divisor) + ":" + strconv.Itoa(height/divisor)
+	return protocol.NormalizeDeclaredImageRatio(value)
 }
 
 func imageResolutionTier(quality string) string {
-	switch strings.ToLower(strings.TrimSpace(quality)) {
-	case "1k", "low":
-		return "1k"
-	case "1.5k":
-		return "1.5k"
-	case "2k", "medium":
-		return "2k"
-	case "4k", "high":
-		return "4k"
-	default:
-		return ""
-	}
+	return protocol.ImageResolutionTier(quality)
 }
 
 func declaredImageResolutionTier(value string) string {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "1k", "1.5k", "2k", "4k":
-		return strings.ToLower(strings.TrimSpace(value))
-	default:
-		return ""
-	}
+	return protocol.DeclaredImageResolutionTier(value)
 }
 
 // Legacy aliases are meaningful only when the model explicitly declares resolution tiers.
 // Ordinary image quality never selects a pixel preset.
 func imagePresetSelectionTier(profile *ImageCapabilityConfig, value string) string {
-	if profile.Parameters != nil {
-		if profile.Resolution.Supported && containsCapabilityString(profile.Resolution.Values, value) {
-			return value
-		}
-		if !profile.Resolution.Supported {
-			if tier, ok := singleImageSizeTier(profile); ok {
-				return tier
-			}
-		}
-		return ""
-	}
-	if tier := declaredImageResolutionTier(value); tier != "" {
-		return tier
-	}
-	if profile.Resolution.Supported || (profile.Quality.Supported && profile.ResolutionUsesQuality) {
-		return imageResolutionTier(value)
-	}
-	for _, quality := range profile.Quality.Values {
-		if declaredImageResolutionTier(quality) != "" {
-			return imageResolutionTier(value)
-		}
-	}
-	return ""
+	return imageSizeDeclarationOf(profile, "").SelectionTier(value)
 }
 
 func imagePresetDefaultTier(profile *ImageCapabilityConfig) string {
-	if profile.Resolution.Supported {
-		return imagePresetSelectionTier(profile, profile.Resolution.Default)
-	}
-	return imagePresetSelectionTier(profile, profile.Quality.Default)
+	return imageSizeDeclarationOf(profile, "").DefaultTierValue()
 }
 
 // resolveImageTaskSize 把画布按比例保存的 size（如 16:9）换算成图片模型
@@ -694,44 +621,13 @@ func imagePresetDefaultTier(profile *ImageCapabilityConfig) string {
 // 换算必须在任务输入边界完成。未命中 preset 的组合不做猜测，交给能力校验给
 // 出明确错误。
 func resolveImageTaskSize(profile *ImageCapabilityConfig, interfaceType string, size string, quality string) string {
-	if profile == nil {
-		return size
-	}
-	value := strings.TrimSpace(size)
-	if value == "" || strings.EqualFold(value, "auto") {
-		return size
-	}
-	preset, ok := declaredImageSizePreset(activeImageSizePresets(profile), value, imagePresetSelectionTier(profile, quality), imagePresetDefaultTier(profile))
-	if !ok {
-		return size
-	}
-	if imageSizePixelOutbound(profile, interfaceType) {
-		return preset.Size
-	}
-	if profile.Size.Parameter == "aspect_ratio" {
-		return strings.TrimSpace(preset.Ratio)
-	}
-	return size
+	return imageSizeDeclarationOf(profile, interfaceType).Resolve(size, quality)
 }
 
 // imageSizePixelOutbound 表示该线路出网需要像素尺寸，决定“比例 → 像素”换算是否发生。
-// parameter=size 由字段本身要求像素；aspect_ratio 只在声明式 OpenAI Images 上被翻成像素。
-func imageSizePixelOutbound(profile *ImageCapabilityConfig, protocol string) bool {
-	if profile == nil {
-		return false
-	}
-	if profile.Parameters != nil {
-		for _, p := range profile.Parameters {
-			if p.Name == "size" && p.IsEnabled() {
-				return p.Encoding == "pixels"
-			}
-		}
-		return false
-	}
-	if profile.Size.Parameter == "size" {
-		return true
-	}
-	return profile.Size.Parameter == "aspect_ratio" && strings.TrimSpace(protocol) == string(model.ChannelInterfaceOpenAIImage)
+// 规则本体在 protocol，与 WASM 侧共用同一份实现。
+func imageSizePixelOutbound(profile *ImageCapabilityConfig, protocolName string) bool {
+	return imageSizeDeclarationOf(profile, protocolName).PixelOutbound()
 }
 
 // imageSizeClientSubmitsRatio 表示画布会按比例提交尺寸。size 字段里出现比例值属于历史

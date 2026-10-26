@@ -1,4 +1,4 @@
-import { assertPersonalOpenAIConfig, PERSONAL_OPENAI_PROTOCOLS } from "@/lib/personal-channel";
+import { assertPersonalOpenAIConfig } from "@/lib/personal-channel";
 import { waitForGenerationTask } from "@/services/api/task-center";
 import { submitBrowserGeneration } from "@/services/browser-generation-runner";
 import { requestAudioGeneration } from "@/services/api/audio";
@@ -8,8 +8,8 @@ import { defaultConfig, encodeChannelModel, type ModelCapability, type ModelChan
 import type { ModelProtocol } from "@/lib/model-protocols";
 
 export async function testChannelModelConnection(channel: ModelChannel, model: string, capability: ModelCapability, protocol: ModelProtocol) {
-    const plugin = channel.scope !== "system" && (capability === "image" || capability === "video") && !PERSONAL_OPENAI_PROTOCOLS.has(protocol);
-    if (channel.scope !== "system" && !plugin) assertPersonalOpenAIConfig({ apiFormat: channel.apiFormat, interfaceType: protocol });
+    const personalMedia = channel.scope !== "system" && (capability === "image" || capability === "video");
+    if (channel.scope !== "system" && !personalMedia) assertPersonalOpenAIConfig({ apiFormat: channel.apiFormat, interfaceType: protocol });
     if (!channel.baseUrl.trim()) throw new Error("请先填写 Base URL");
     if (!channel.apiKey.trim()) throw new Error("请先填写 API Key");
     const selectedModel = encodeChannelModel(channel.id, model);
@@ -60,7 +60,7 @@ export async function testChannelModelConnection(channel: ModelChannel, model: s
             await requestImageQuestion(config, [{ role: "user", content: "Reply with OK." }], () => undefined);
             return "文本响应正常";
         case "image":
-            if (plugin) {
+            if (personalMedia) {
                 const task = await submitBrowserGeneration({ config, mode: "image", prompt: "A simple gray circle on a white background." });
                 await waitForGenerationTask(task.id, { initialTask: task });
             } else await requestGeneration(config, "A simple gray circle on a white background.");

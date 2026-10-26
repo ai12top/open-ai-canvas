@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"yingce/backend/internal/model"
+	"yingce/backend/internal/protocol"
 )
 
 func isPublicMediaURL(value string) bool {
@@ -102,32 +103,9 @@ func imageSizeParameter(profile *ImageCapabilityConfig, value string) (string, s
 	}
 }
 
+// normalizeImageAspectRatio 只做转发：像素/比例归一化规则只有 protocol 里的一份。
 func normalizeImageAspectRatio(value string) string {
-	value = strings.TrimSpace(strings.ToLower(strings.ReplaceAll(value, "×", "x")))
-	if strings.Contains(value, ":") {
-		return value
-	}
-	parts := strings.Split(value, "x")
-	if len(parts) != 2 {
-		return ""
-	}
-	width, widthErr := strconv.Atoi(parts[0])
-	height, heightErr := strconv.Atoi(parts[1])
-	if widthErr != nil || heightErr != nil || width <= 0 || height <= 0 {
-		return ""
-	}
-	divisor := imageDimensionGCD(width, height)
-	return strconv.Itoa(width/divisor) + ":" + strconv.Itoa(height/divisor)
-}
-
-func imageDimensionGCD(left int, right int) int {
-	for right != 0 {
-		left, right = right, left%right
-	}
-	if left < 1 {
-		return 1
-	}
-	return left
+	return protocol.NormalizeImageAspectRatio(value)
 }
 
 func normalizePixelSize(value string) string {

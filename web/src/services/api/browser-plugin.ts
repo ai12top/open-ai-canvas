@@ -12,13 +12,13 @@ import { channelRequest, type ChannelRequest } from "@/services/api/custom-chann
 import { fetchPluginProviderCatalog } from "@/services/api/plugin-catalog";
 import {
     callBrowserProtocol,
-    type BrowserPluginAuth,
     type BrowserPluginHandle,
     type BrowserPluginManifest,
     type BrowserPluginReference,
     type BrowserPluginRequest,
     type BrowserPluginResult,
     type BrowserProtocolDescription,
+    type BrowserProtocolHTTP,
     type BrowserProtocolRequestSpec,
 } from "@/services/api/browser-protocol";
 
@@ -32,24 +32,19 @@ const PLUGIN_STATUSES = new Set<BrowserPluginResult["status"]>(["pending", "proc
  * 解析所选渠道的声明式插件：catalog 的 browserManifest 才是可执行标记，
  * 再用 Go describe 确认创建操作存在。返回原始 manifest，供持久化句柄复用。
  * 内置 OpenAI 协议名可能被同名插件占用（官方 openai-images 的 provider id 就是 openai-image），
- * 同名时以 catalog 为准；catalog 不可达或没有该插件时回退内置协议，返回 undefined。
+ * 同名时以 catalog 为准；只有目录确认没有该内置协议的插件时才返回 undefined。
+ * 目录不可达或明确不支持浏览器执行时直接报错，避免改变所选协议。
  */
 export async function resolveBrowserPlugin(config: ChannelTransportConfig, capability: BrowserPluginCapability): Promise<BrowserPluginManifest | undefined> {
     requireBrowserPluginConfig(config);
     const providerId = (config.interfaceType || "").trim();
     if (!providerId) throw new Error("请先选择浏览器可执行的声明式插件协议");
     const builtin = PERSONAL_OPENAI_PROTOCOLS.has(providerId);
-    let providers: Awaited<ReturnType<typeof fetchPluginProviderCatalog>>;
-    try {
-        providers = await fetchPluginProviderCatalog("user.custom-channel", capability);
-    } catch (error) {
-        if (builtin) return undefined;
-        throw error;
-    }
+    const providers = await fetchPluginProviderCatalog("user.custom-channel", capability);
     const selected = providers.find((item) => item.value === providerId);
     const manifest = selected?.browserManifest as BrowserPluginManifest | undefined;
     if (!manifest) {
-        if (builtin) return undefined;
+        if (!selected && builtin) return undefined;
         throw new Error(selected?.browserUnsupportedReason || `当前渠道未提供${capability === "image" ? "图片" : "视频"}能力的声明式插件`);
     }
     const description = await callBrowserProtocol<BrowserProtocolDescription>({ op: "describe", manifest, providerId, baseUrl: pluginBaseUrl(config) });
@@ -122,14 +117,14 @@ export async function fetchBrowserPluginResult(config: ChannelTransportConfig, h
  * 结果媒体下载：同源媒体（用户选中的 Base URL 主机）带 manifest 鉴权，第三方 CDN 与
  * data:/blob: 一律不带密钥；凭证始终 omit。
  */
-export function pluginDownloadRequest(config: ChannelTransportConfig, manifest: BrowserPluginManifest, url: string): ChannelRequest {
+export async function pluginDownloadRequest(config: ChannelTransportConfig, manifest: BrowserPluginManifest, url: string): Promise<ChannelRequest> {
     const target = (url || "").trim();
     if (!target) throw new Error("缺少待下载的媒体地址");
     if (config.channelScope !== "user" || !/^https?:\/\//iu.test(target)) return { url: target, headers: {}, credentials: "omit" };
     const relayConfig = { ...config, declarativePlugin: true };
     const base = new URL(pluginBaseUrl(config));
     if (new URL(target).origin !== base.origin) return { url: target, headers: {}, credentials: "omit" };
-    const authHeaders = browserPluginAuthHeaders(config, browserPluginAuth(manifest));
+    const { headers: authHeaders } = await preparePluginHTTP(config, manifest, {});
     try {
         return channelRequest(relayConfig, target, authHeaders);
     } catch {
@@ -157,10 +152,6 @@ function browserPluginProviderId(manifest: BrowserPluginManifest): string {
     return providerId;
 }
 
-function browserPluginAuth(manifest: BrowserPluginManifest): BrowserPluginAuth | undefined {
-    return browserPluginProviders(manifest).find((provider) => provider.auth)?.auth;
-}
-
 /** manifest 里声明了 result 端点才允许下载（与 Go describe 的 operations.result 同源）。 */
 function browserPluginProviderResult(manifest: BrowserPluginManifest, providerId: string): boolean {
     const provider = browserPluginProviders(manifest).find((item) => item.id === providerId);
@@ -170,17 +161,17 @@ function browserPluginProviderResult(manifest: BrowserPluginManifest, providerId
 async function sendPluginRequest(config: ChannelTransportConfig, manifest: BrowserPluginManifest, spec: BrowserProtocolRequestSpec, request: BrowserPluginRequest, signal?: AbortSignal): Promise<unknown> {
     const url = pluginRequestUrl(config, spec);
     const contentType = (spec.contentType || "").trim();
-    const headers: Record<string, string> = { ...(spec.headers || {}), ...browserPluginAuthHeaders(config, spec.auth ?? browserPluginAuth(manifest)) };
+    const { headers, formValues } = await preparePluginHTTP(config, manifest, spec);
     const transport = createChannelTransport(pluginTransportConfig(config, spec), pluginScene(request));
     const method = (spec.method || "POST").trim().toUpperCase();
     if (method === "GET") return transport.get<unknown>(url, { signal, headers });
     if (method !== "POST") throw new Error(`声明式插件暂不支持 ${method} 请求`);
     if (spec.files?.length || contentType.toLowerCase().startsWith("multipart/form-data")) {
-        return transport.postForm<unknown>(url, await browserPluginFormData(spec, signal), { signal, headers });
+        return transport.postForm<unknown>(url, await browserPluginFormData(spec, formValues, signal), { signal, headers });
     }
     if (contentType) headers["Content-Type"] = contentType;
     if (contentType.toLowerCase().startsWith("application/x-www-form-urlencoded")) {
-        return transport.postJson<unknown>(url, new URLSearchParams(pluginFormEntries(spec.body)).toString(), { signal, headers });
+        return transport.postJson<unknown>(url, new URLSearchParams(formValues.map(({ name, value }) => [name, value])).toString(), { signal, headers });
     }
     return transport.postJson<unknown>(url, spec.body ?? {}, { signal, headers });
 }
@@ -203,13 +194,8 @@ function pluginTransportConfig(config: ChannelTransportConfig, spec: BrowserProt
 async function sendPluginBlob(config: ChannelTransportConfig, manifest: BrowserPluginManifest, spec: BrowserProtocolRequestSpec, signal?: AbortSignal): Promise<Blob> {
     const method = (spec.method || "GET").trim().toUpperCase();
     if (method !== "GET") throw new Error(`声明式插件结果端点暂不支持 ${method} 请求`);
-    const headers: Record<string, string> = { ...(spec.headers || {}), ...browserPluginAuthHeaders(config, spec.auth ?? browserPluginAuth(manifest)) };
-    const request = channelRequest(pluginTransportConfig(config, spec), pluginRequestUrl(config, spec), headers);
-    const response = await fetch(request.url, { method, headers: request.headers, credentials: request.credentials, signal });
-    if (!response.ok) throw new Error(`插件结果下载失败（HTTP ${response.status}）`);
-    const declared = ((response.headers.get("content-type") || "").split(";")[0] || "").trim();
-    const blob = await response.blob();
-    return declared && blob.type !== declared ? new Blob([blob], { type: declared }) : blob;
+    const { headers } = await preparePluginHTTP(config, manifest, spec);
+    return createChannelTransport(pluginTransportConfig(config, spec)).getBlob(pluginRequestUrl(config, spec), { signal, headers });
 }
 
 /** 路径保持相对；originPath 表示从 Base URL 的 origin 根拼接，否则沿用现有 prefix/`/v1` 去重语义。 */
@@ -230,45 +216,26 @@ function appendPluginQuery(url: string, query?: Record<string, string[]>): strin
     return parsed.toString();
 }
 
-/**
- * manifest 鉴权投影。空类型沿用个人渠道的默认 Bearer；签名/query 鉴权不会进入浏览器
- * （catalog 与 Go bridge 已排除），其它未知类型明确拒绝而不是静默发出无鉴权请求。
- */
-function browserPluginAuthHeaders(config: ChannelTransportConfig, auth?: BrowserPluginAuth): Record<string, string> {
-    const apiKey = (config.apiKey || "").trim();
-    const type = (auth?.type || "").trim().toLowerCase();
-    const prefix = auth?.prefix ?? "";
-    if (!type || type === "none") return apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
-    if (!apiKey) throw new Error("当前插件需要 API Key，请先在渠道设置中填写");
-    switch (type) {
-        case "bearer":
-            return { Authorization: `${prefix || "Bearer "}${apiKey}` };
-        case "header":
-        case "api-key":
-        case "apikey":
-        case "anthropic":
-            return { [auth?.header || "x-api-key"]: `${prefix}${apiKey}` };
-        case "google-api-key":
-        case "gemini":
-            return { [auth?.header || "x-goog-api-key"]: apiKey };
-        case "basic":
-            return { Authorization: `Basic ${btoa(`${auth?.username || ""}:${apiKey}`)}` };
-        default:
-            throw new Error(`声明式插件暂不支持该鉴权方式：${auth?.type}`);
-    }
+/** 使用宿主共享的纯鉴权和表单规则；凭据只在这一次调用中传入。 */
+async function preparePluginHTTP(config: ChannelTransportConfig, manifest: BrowserPluginManifest, spec: BrowserProtocolRequestSpec) {
+    const prepared = await callBrowserProtocol<BrowserProtocolHTTP>({
+        op: "prepareHTTP", manifest, providerId: browserPluginProviderId(manifest), spec,
+        credentials: { apiKey: config.apiKey || "" }, apiFormat: config.apiFormat,
+    });
+    const headers = new Headers(spec.headers);
+    for (const { name, value } of prepared.headers || []) headers.set(name, value);
+    return { headers: Object.fromEntries(headers.entries()), formValues: prepared.formValues || [] };
 }
 
-function pluginFormEntries(body: unknown): Array<[string, string]> {
-    return Object.entries(asRecord(body)).flatMap(([name, value]) => (value === undefined || value === null ? [] : [[name, typeof value === "string" ? value : JSON.stringify(value)] as [string, string]]));
-}
-
-async function browserPluginFormData(spec: BrowserProtocolRequestSpec, signal?: AbortSignal): Promise<FormData> {
+async function browserPluginFormData(spec: BrowserProtocolRequestSpec, entries: NonNullable<BrowserProtocolHTTP["formValues"]>, signal?: AbortSignal): Promise<FormData> {
     const form = new FormData();
-    for (const [name, value] of pluginFormEntries(spec.body)) form.append(name, value);
+    for (const { name, value } of entries) form.append(name, value);
     for (const file of spec.files || []) {
         if (!file?.name) continue;
         const reference = file.reference || {};
-        const blob = await pluginReferenceBlob(reference, signal);
+        let blob = await pluginReferenceBlob(reference, signal);
+        const mimeType = file.mimeType || reference.mimeType;
+        if (mimeType && blob.type !== mimeType) blob = new Blob([blob], { type: mimeType });
         form.append(file.name, blob, file.filename || reference.name || file.name);
     }
     return form;
@@ -288,8 +255,4 @@ function normalizePluginResult(parsed: BrowserPluginResult | undefined, fallback
     const status = parsed.status;
     if (!PLUGIN_STATUSES.has(status)) throw new Error(`插件协议返回了未知状态：${String(status)}`);
     return { status, taskId: parsed.taskId || fallbackTaskId, result: parsed.result, message: parsed.message };
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-    return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }

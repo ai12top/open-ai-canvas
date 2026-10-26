@@ -349,31 +349,9 @@ func protocolBodyObject(value any) map[string]any {
 	return result
 }
 
+// protocolFormValues 与浏览器共用 protocol.FormValues：数组展开成重复字段，标量按既有格式。
 func protocolFormValues(value any) []string {
-	switch typed := value.(type) {
-	case nil:
-		return nil
-	case []any:
-		result := make([]string, 0, len(typed))
-		for _, item := range typed {
-			result = append(result, protocolFormValues(item)...)
-		}
-		return result
-	case string:
-		return []string{typed}
-	case bool:
-		return []string{strconv.FormatBool(typed)}
-	case float64:
-		return []string{strconv.FormatFloat(typed, 'f', -1, 64)}
-	case int:
-		return []string{strconv.Itoa(typed)}
-	default:
-		data, err := json.Marshal(typed)
-		if err != nil {
-			return nil
-		}
-		return []string{string(data)}
-	}
+	return protocol.FormValues(value)
 }
 
 func safeProtocolFilename(value string) string {

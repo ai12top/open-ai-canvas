@@ -373,6 +373,32 @@ func TestImageParametersDisabledResolutionUsesDefaultAndPreservesGroups(t *testi
 	}
 }
 
+func TestImageParametersDisabledResolutionInfersParameterDefault(t *testing.T) {
+	profile := DefaultModelCapabilityConfigForModel("opaque-provider", "opaque-model")
+	disabled := false
+	profile.Image.Parameters = []protocol.ImageParameter{
+		{Name: "size", Label: "Size", Type: "string", Values: []any{"1:1"}, Default: "1:1", Binding: "aspectRatio", Encoding: "pixels"},
+		{Name: "imageResolution", Label: "Resolution", Type: "string", Values: []any{"1k", "2k"}, Default: "2k", Binding: "resolution", Enabled: &disabled},
+	}
+	profile.Image.Size.Presets = []ImageSizePreset{
+		{Tier: "1k", Ratio: "1:1", Width: 1024, Height: 1024, Size: "1024x1024"},
+		{Tier: "2k", Ratio: "1:1", Width: 2048, Height: 2048, Size: "2048x2048"},
+	}
+	if err := projectImageParameters(profile.Image); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateImageSizePresetRequirement("image", "opaque-provider", profile); err != nil {
+		t.Fatalf("disabled parameter default must select the tier: %v", err)
+	}
+	config := providerConfig{InterfaceType: "opaque-provider", Size: "1:1"}
+	if err := applyImageParameterValues(&config, profile.Image); err != nil {
+		t.Fatal(err)
+	}
+	if config.Size != "2048x2048" || config.ImageResolution != "" {
+		t.Fatalf("disabled default changed output: %#v", config)
+	}
+}
+
 func TestImageParametersDisabledResolutionRejectsAmbiguousPixels(t *testing.T) {
 	profile := DefaultModelCapabilityConfigForModel("opaque-provider", "opaque-model")
 	profile.Image.Parameters = []protocol.ImageParameter{{Name: "size", Label: "Frame", Type: "string", Values: []any{"1:1"}, Default: "1:1", Binding: "aspectRatio", Encoding: "pixels"}}

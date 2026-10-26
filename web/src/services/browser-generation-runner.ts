@@ -69,7 +69,7 @@ async function resultBlob(url: string, record: BrowserGenerationRecord, signal?:
     if (/^https?:/i.test(url) && new URL(url).origin === new URL(record.baseUrl).origin) {
         // Files served by the provider itself may require the same bearer key; never send it to a CDN.
         const config = currentRecordConfig(record);
-        headers = record.pluginTask ? pluginDownloadRequest(config, record.pluginTask.manifest, url).headers : channelRequest(config, url).headers;
+        headers = record.pluginTask ? (await pluginDownloadRequest(config, record.pluginTask.manifest, url)).headers : channelRequest(config, url).headers;
     }
     const response = await fetch(url, { headers, credentials: "omit", signal });
     if (!response.ok) throw new Error("生成文件下载失败，请恢复下载，不要重新生成");

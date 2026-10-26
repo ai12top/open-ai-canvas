@@ -1,10 +1,32 @@
 /**
  * 浏览器声明式插件协议桥：只负责加载 Go WASM 运行时并做 JSON 往返，
- * 不碰 HTTP、URL 拼接、凭据、持久化或轮询调度。协议语义全部来自后端
- * 同一份 Go 实现（globalThis.yingceBrowserProtocol）。
+ * 不执行 HTTP、URL 拼接、持久化或轮询调度。瞬时凭据仅用于共享 Go
+ * 鉴权规则的纯投影；协议语义来自同一份 Go 实现（globalThis.yingceBrowserProtocol）。
  */
 
-export type BrowserProtocolOperation = "load" | "describe" | "buildCreate" | "buildPoll" | "buildCancel" | "buildResult" | "parseCreate" | "parsePoll";
+export type BrowserProtocolOperation = "load" | "describe" | "normalizeImage" | "prepareHTTP" | "buildCreate" | "buildPoll" | "buildCancel" | "buildResult" | "parseCreate" | "parsePoll";
+
+/** 渠道能力画像的纯声明；像素转换只在 Go 中执行。 */
+export type ImageSizeDeclaration = {
+    parameter?: string;
+    encoding?: string;
+    usesParameters?: boolean;
+    values?: string[];
+    default?: string;
+    allowCustom?: boolean;
+    defaultTier?: string;
+    resolutionParameterDefault?: string;
+    presets?: Array<{ tier: string; ratio: string; size: string; width?: number; height?: number }>;
+    resolution: { supported: boolean; values?: string[]; default?: string };
+    quality: { supported: boolean; values?: string[]; default?: string };
+    resolutionUsesQuality?: boolean;
+    interfaceType?: string;
+};
+
+export type BrowserProtocolHTTP = {
+    headers?: Array<{ name: string; value: string }>;
+    formValues?: Array<{ name: string; value: string }>;
+};
 
 export type BrowserPluginAuth = {
     type?: string;
@@ -132,6 +154,10 @@ export type BrowserProtocolCall = {
     taskId?: string;
     metadata?: Record<string, unknown>;
     body?: unknown;
+    imageSize?: ImageSizeDeclaration;
+    spec?: BrowserProtocolRequestSpec;
+    credentials?: { apiKey?: string };
+    apiFormat?: string;
 };
 
 type BrowserProtocolReply<T> = { ok: true; data: T } | { ok: false; error?: string };

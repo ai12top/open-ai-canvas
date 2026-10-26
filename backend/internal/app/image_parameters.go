@@ -165,49 +165,64 @@ func publicImageParameters(parameters []protocol.ImageParameter) []protocol.Imag
 	return result
 }
 
-// Disabled resolution keeps its presets for editing; execution uses one explicit
-// default group. Multiple groups without a default must not pick by array order.
-func singleImageSizeTier(image *ImageCapabilityConfig) (string, bool) {
-	if image.Size.DefaultTier != "" {
-		return image.Size.DefaultTier, true
+// imageSizeDeclarationOf 是“能力画像 → 纯声明”的唯一映射。换算规则本身只有一份，
+// 放在 protocol（WASM/bridge 也调用同一份），app 侧只剩这层投影与薄包装。
+func imageSizeDeclarationOf(image *ImageCapabilityConfig, interfaceType string) protocol.ImageSizeDeclaration {
+	if image == nil {
+		return protocol.ImageSizeDeclaration{}
+	}
+	encoding := ""
+	for _, field := range image.Parameters {
+		if field.Name == "size" && field.IsEnabled() {
+			encoding = field.Encoding
+			break
+		}
+	}
+	declaration := protocol.ImageSizeDeclaration{
+		Parameter:             image.Size.Parameter,
+		Encoding:              encoding,
+		UsesParameters:        image.Parameters != nil,
+		Values:                image.Size.Values,
+		Default:               image.Size.Default,
+		AllowCustom:           image.Size.AllowCustom,
+		DefaultTier:           image.Size.DefaultTier,
+		Resolution:            protocol.ImageTierDeclaration{Supported: image.Resolution.Supported, Values: image.Resolution.Values, Default: image.Resolution.Default},
+		Quality:               protocol.ImageTierDeclaration{Supported: image.Quality.Supported, Values: image.Quality.Values, Default: image.Quality.Default},
+		ResolutionUsesQuality: image.ResolutionUsesQuality,
+		InterfaceType:         interfaceType,
 	}
 	for _, field := range image.Parameters {
 		if field.Name == "imageResolution" && field.Default != nil && field.Default != "auto" {
-			return fmt.Sprint(field.Default), true
+			value := fmt.Sprint(field.Default)
+			declaration.ResolutionParameterDefault = &value
+			break
 		}
 	}
 	for _, preset := range image.Size.Presets {
-		if preset.Size == image.Size.Default {
-			return preset.Tier, true
-		}
+		declaration.Presets = append(declaration.Presets, protocol.ImageSizePreset{Tier: preset.Tier, Ratio: preset.Ratio, Size: preset.Size, Width: preset.Width, Height: preset.Height})
 	}
-	if len(image.Size.Presets) == 0 {
-		return "", true
+	return declaration
+}
+
+func imageSizePresetsFromDeclaration(presets []protocol.ImageSizePreset) []ImageSizePreset {
+	if presets == nil {
+		return nil
 	}
-	tier := image.Size.Presets[0].Tier
-	for _, preset := range image.Size.Presets {
-		if preset.Tier != tier {
-			return "", false
-		}
+	result := make([]ImageSizePreset, 0, len(presets))
+	for _, preset := range presets {
+		result = append(result, ImageSizePreset{Tier: preset.Tier, Ratio: preset.Ratio, Size: preset.Size, Width: preset.Width, Height: preset.Height})
 	}
-	return tier, true
+	return result
+}
+
+// Disabled resolution keeps its presets for editing; execution uses one explicit
+// default group. Multiple groups without a default must not pick by array order.
+func singleImageSizeTier(image *ImageCapabilityConfig) (string, bool) {
+	return imageSizeDeclarationOf(image, "").SingleTier()
 }
 
 func activeImageSizePresets(image *ImageCapabilityConfig) []ImageSizePreset {
-	if image.Parameters == nil || image.Resolution.Supported {
-		return image.Size.Presets
-	}
-	tier, ok := singleImageSizeTier(image)
-	if !ok {
-		return nil
-	}
-	result := make([]ImageSizePreset, 0, len(image.Size.Presets))
-	for _, preset := range image.Size.Presets {
-		if preset.Tier == tier {
-			result = append(result, preset)
-		}
-	}
-	return result
+	return imageSizePresetsFromDeclaration(imageSizeDeclarationOf(image, "").ActivePresets())
 }
 
 func imageParameterConstraints(parameters []protocol.ImageParameter) map[string]OptionConstraint {
