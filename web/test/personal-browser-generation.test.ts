@@ -4,9 +4,10 @@ import localforage from "localforage";
 import { useUserStore } from "../src/stores/use-user-store";
 import * as userScope from "../src/lib/user-scope";
 import * as pluginCatalog from "../src/services/api/plugin-catalog";
+import { resetBrowserProtocolBridge } from "../src/services/api/browser-protocol";
 import * as imageStorage from "../src/services/image-storage";
 import { channelRequest } from "../src/services/api/custom-channel-relay";
-import { fetchChannelModels } from "../src/services/api/image-models";
+import { fetchChannelModels, fetchImageModels } from "../src/services/api/image-models";
 import { createModelChannel, defaultConfig, encodeChannelModel, resolveModelRequestConfig, useConfigStore } from "../src/stores/use-config-store";
 import { listBrowserGenerations, readBrowserGeneration, writeBrowserGeneration } from "../src/services/browser-generation-store";
 import { queryBrowserGeneration, submitBrowserGeneration } from "../src/services/browser-generation-runner";
@@ -42,6 +43,7 @@ afterEach(() => {
     useUserStore.setState(originalUser);
     useConfigStore.setState({ config: originalConfig });
     globalThis.fetch = originalFetch;
+    resetBrowserProtocolBridge();
     if (originalNavigator) Object.defineProperty(globalThis, "navigator", originalNavigator); else Reflect.deleteProperty(globalThis, "navigator");
 });
 
@@ -66,9 +68,189 @@ test("personal transport omits session credentials and proxy headers; system tra
     expect(system.url).toEndWith("/ai/custom");
     expect(system.credentials).toBe("include");
     expect(() => channelRequest(personal, "https://other.example/v1/chat/completions")).toThrow("超出");
-    expect(() => channelRequest({ ...personal, headers: [{ name: "Authorization", value: "override" }] }, request.url)).toThrow("系统管理");
+    expect(() => channelRequest({ ...personal, declarativePlugin: true, headers: [{ name: "Authorization", value: "override" }] }, request.url)).toThrow("系统管理");
     expect(() => channelRequest({ ...personal, baseUrl: "https://name:pass@personal.example/v1" }, request.url)).toThrow("userinfo");
     expect(() => channelRequest({ ...personal, interfaceType: "gemini-image" }, request.url)).toThrow("仅支持");
+});
+
+/** 真实结构的 v2 manifest：鉴权只由 catalog 声明的 auth 决定（与 Go HeaderAuth 同一份规则）。 */
+function pluginManifest(providerId: string, capability: "image" | "video", auth?: Record<string, string>) {
+    return {
+        apiVersion: "yingce.plugin/v2",
+        metadata: { id: "dreamina-cli", name: "Dreamina CLI", version: "1.2.0", vendor: "yingce", enabled: true },
+        contributes: {
+            providers: [
+                {
+                    id: providerId,
+                    label: "Dreamina",
+                    capabilities: [capability],
+                    scopes: ["user.custom-channel"],
+                    auth,
+                    create: { method: "POST", path: "{{model}}", contentType: "application/json" },
+                },
+            ],
+        },
+    };
+}
+
+/** 共享 Go WASM 鉴权的替身：只按 manifest 声明的 auth 投影请求头，不在测试里复刻业务判定。 */
+function sharedAuthBridge() {
+    const calls: Array<Record<string, unknown>> = [];
+    globalThis.yingceBrowserProtocol = (input: string) => {
+        const call = JSON.parse(input) as {
+            op?: string;
+            manifest?: { contributes?: { providers?: Array<{ auth?: Record<string, string> }> } };
+            credentials?: { apiKey?: string };
+            spec?: { method?: string; path?: string };
+        };
+        calls.push(call as unknown as Record<string, unknown>);
+        if (call.op !== "prepareHTTP") return JSON.stringify({ ok: false, error: `unexpected op ${call.op}` });
+        const auth = call.manifest?.contributes?.providers?.[0]?.auth || {};
+        const apiKey = call.credentials?.apiKey || "";
+        const headers: Array<{ name: string; value: string }> = [];
+        switch (String(auth.type || "").toLowerCase()) {
+            case "none":
+                break;
+            case "bearer":
+                headers.push({ name: auth.header || "Authorization", value: `${auth.prefix || "Bearer "}${apiKey}` });
+                break;
+            case "header":
+            case "api-key":
+                headers.push({ name: auth.header, value: `${auth.prefix || ""}${apiKey}` });
+                break;
+            case "basic":
+                headers.push({ name: "Authorization", value: `Basic ${btoa(`${auth.username || apiKey}:`)}` });
+                break;
+            default:
+                headers.push({ name: "Authorization", value: `Bearer ${apiKey}` });
+        }
+        return JSON.stringify({ ok: true, data: { headers, formValues: [] } });
+    };
+    return calls;
+}
+
+function stubPluginCatalog(state: { providers: Array<Record<string, unknown>>; failure?: string }) {
+    const requests: Array<{ scope?: string; capability?: string }> = [];
+    restores.push(spyOn(pluginCatalog, "fetchPluginProviderCatalog").mockImplementation((async (scope: string, capability?: string) => {
+        requests.push({ scope, capability });
+        if (state.failure) throw new Error(state.failure);
+        return state.providers.filter((provider) => !capability || provider.capability === capability) as never;
+    }) as never));
+    return requests;
+}
+
+function stubModelRequest(payload: unknown = { data: [{ id: "list-model" }] }) {
+    const requests: Array<Record<string, unknown>> = [];
+    restores.push(spyOn(axios, "request").mockImplementation(async (input) => {
+        requests.push(input as unknown as Record<string, unknown>);
+        return { data: payload } as never;
+    }));
+    return requests;
+}
+
+function personalModelConfig(interfaceType: string) {
+    return { baseUrl: channel.baseUrl, apiKey: channel.apiKey, apiFormat: "openai" as const, channelScope: "user" as const, interfaceType };
+}
+
+test("personal model discovery forwards the manifest auth produced by the shared Go rules", async () => {
+    const bridge = sharedAuthBridge();
+    const catalog = stubPluginCatalog({
+        providers: [
+            { value: "dreamina-cli-image", capability: "image", browserManifest: pluginManifest("dreamina-cli-image", "image", { type: "header", field: "apiKey", header: "X-Api-Key" }) },
+            { value: "dreamina-cli-video", capability: "video", browserManifest: pluginManifest("dreamina-cli-video", "video", { type: "none" }) },
+        ],
+    });
+    const requests = stubModelRequest({ data: [{ id: "image-model" }] });
+
+    await expect(fetchImageModels(personalModelConfig("dreamina-cli-image"))).resolves.toEqual(["image-model"]);
+    expect(catalog[0]).toEqual({ scope: "user.custom-channel", capability: "image" });
+    expect(requests[0]).toMatchObject({ method: "get", url: "https://personal.example/v1/models", withCredentials: false, headers: { "x-api-key": "synthetic-private-key" } });
+    expect(requests[0]!.headers).not.toHaveProperty("authorization");
+
+    // 只声明视频能力的插件同样可以拉模型目录；manifest 声明 none 时不夹带任何凭据，也不回退 Bearer。
+    await expect(fetchImageModels(personalModelConfig("dreamina-cli-video"))).resolves.toEqual(["image-model"]);
+    expect(catalog.map((item) => item.capability)).toEqual(["image", "image", "video"]);
+    expect(requests[1]).toMatchObject({ url: "https://personal.example/v1/models", withCredentials: false, headers: {} });
+    expect(requests[1]!.headers).not.toHaveProperty("authorization");
+
+    const prepared = bridge.filter((call) => call.op === "prepareHTTP");
+    expect(prepared.length).toBe(2);
+    expect(prepared[0]).toMatchObject({ credentials: { apiKey: "synthetic-private-key" }, spec: { method: "GET", path: "/models" } });
+});
+
+test("default and basic manifest auth also come from the shared rules instead of a hardcoded Bearer", async () => {
+    sharedAuthBridge();
+    stubPluginCatalog({
+        providers: [
+            { value: "dreamina-cli-image", capability: "image", browserManifest: pluginManifest("dreamina-cli-image", "image") },
+            { value: "dreamina-cli-basic", capability: "image", browserManifest: pluginManifest("dreamina-cli-basic", "image", { type: "basic", passwordField: "apiKey" }) },
+        ],
+    });
+    const requests = stubModelRequest({ data: [{ id: "image-model" }] });
+
+    await expect(fetchImageModels(personalModelConfig("dreamina-cli-image"))).resolves.toEqual(["image-model"]);
+    expect(requests[0]!.headers).toMatchObject({ authorization: "Bearer synthetic-private-key" });
+
+    await expect(fetchImageModels(personalModelConfig("dreamina-cli-basic"))).resolves.toEqual(["image-model"]);
+    // image-models 只拿到 apiKey：Basic 凭据串只可能来自共享 Go 规则，而不是调用方硬编码的 Bearer。
+    expect(requests[1]!.headers).toMatchObject({ authorization: `Basic ${btoa("synthetic-private-key:")}` });
+});
+
+test("text-only, uninstalled and non-browser plugin protocols stay blocked for personal model discovery", async () => {
+    const state: { providers: Array<Record<string, unknown>> } = { providers: [{ value: "qcreate-cli-text", capability: "text", browserManifest: pluginManifest("qcreate-cli-text", "image") }] };
+    const catalog = stubPluginCatalog(state);
+    const requests = stubModelRequest();
+
+    // 只声明 text 能力：媒体能力目录里查不到，不能当成图片/视频插件放行。
+    await expect(fetchImageModels(personalModelConfig("qcreate-cli-text"))).rejects.toThrow("当前渠道未提供图片或视频能力的声明式插件");
+    expect(catalog.map((item) => item.capability)).toEqual(["image", "video"]);
+
+    state.providers.length = 0;
+    await expect(fetchImageModels(personalModelConfig("qcreate-cli-image"))).rejects.toThrow("当前渠道未提供图片或视频能力的声明式插件");
+
+    // 目录里有同名 provider 但没有 browserManifest：仍不是可执行的媒体协议。
+    state.providers.push({ value: "qcreate-cli-image", capability: "image" });
+    await expect(fetchImageModels(personalModelConfig("qcreate-cli-image"))).rejects.toThrow("当前渠道未提供图片或视频能力的声明式插件");
+    expect(requests).toHaveLength(0);
+});
+
+test("standard OpenAI protocols keep Bearer when the catalog has no same-name plugin or is unreachable", async () => {
+    const state: { providers: Array<Record<string, unknown>>; failure?: string } = { providers: [] };
+    const catalog = stubPluginCatalog(state);
+    const requests = stubModelRequest({ data: [{ id: "gpt-image" }] });
+
+    await expect(fetchImageModels(personalModelConfig("openai-image"))).resolves.toEqual(["gpt-image"]);
+    expect(catalog.map((item) => item.capability)).toEqual(["image", "video"]);
+    expect(requests[0]).toMatchObject({ url: "https://personal.example/v1/models", withCredentials: false, headers: { authorization: "Bearer synthetic-private-key" } });
+
+    // 内置标准协议可按既有行为降级；未知协议不能因目录故障被放行。
+    state.failure = "catalog unreachable";
+    await expect(fetchImageModels(personalModelConfig("openai-video"))).resolves.toEqual(["gpt-image"]);
+    await expect(fetchImageModels(personalModelConfig("libtv-image"))).rejects.toThrow("catalog unreachable");
+    expect(requests).toHaveLength(2);
+});
+
+test("a catalog plugin shadowing the openai-image protocol owns model discovery auth", async () => {
+    sharedAuthBridge();
+    stubPluginCatalog({ providers: [{ value: "openai-image", capability: "image", browserManifest: pluginManifest("openai-image", "image", { type: "header", field: "apiKey", header: "X-Api-Key" }) }] });
+    const requests = stubModelRequest({ data: [{ id: "gpt-image" }] });
+
+    await expect(fetchImageModels(personalModelConfig("openai-image"))).resolves.toEqual(["gpt-image"]);
+    expect(requests[0]!.headers).toMatchObject({ "x-api-key": "synthetic-private-key" });
+    expect(requests[0]!.headers).not.toHaveProperty("authorization");
+});
+
+test("system and Gemini channels never consult the plugin catalog", async () => {
+    restores.push(spyOn(pluginCatalog, "fetchPluginProviderCatalog").mockImplementation(async () => { throw new Error("该渠道不应查询插件目录"); }));
+    restores.push(spyOn(axios, "request").mockImplementation(async (input) => {
+        // 系统渠道统一走 /ai/custom，靠后端代取声明的上游格式区分 OpenAI 与 Gemini 目录。
+        const headers = ((input as { headers?: Record<string, string> }).headers || {});
+        return { data: headers["x-canvas-upstream-format"] === "gemini" ? { models: [{ name: "models/gemini-2.5-flash" }] } : { data: [{ id: "shared" }] } } as never;
+    }));
+
+    await expect(fetchImageModels({ ...personalModelConfig("dreamina-cli-video"), channelScope: "system" })).resolves.toEqual(["shared"]);
+    // 个人渠道的 Gemini 本来就不允许直连，这里只看系统 Gemini 不查插件目录。
+    await expect(fetchImageModels({ ...personalModelConfig("dreamina-cli-video"), channelScope: "system", apiFormat: "gemini" })).resolves.toEqual(["gemini-2.5-flash"]);
 });
 
 test("channel identity cannot drift to a different channel offering the same model", async () => {
@@ -81,6 +263,8 @@ test("channel identity cannot drift to a different channel offering the same mod
 });
 
 test("even a caller requesting backend model discovery cannot upload personal credentials", async () => {
+    // 个人 OpenAI 渠道即使走本地拉取也只看目录里有没有同名插件；这里目录为空，沿用内置 Bearer。
+    stubPluginCatalog({ providers: [] });
     let seen = "";
     restores.push(spyOn(axios, "request").mockImplementation(async (request) => { seen = request.url || ""; expect(request.withCredentials).toBe(false); return { data: { data: [{ id: "shared" }] } } as never; }));
     expect((await fetchChannelModels(channel, true)).models).toEqual(["shared"]);

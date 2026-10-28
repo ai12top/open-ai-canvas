@@ -1,0 +1,7 @@
+# `bun test` 默认把 NODE_ENV 设为 test，但只有在外部没有继承 NODE_ENV 时才生效。
+# 宿主进程带进来的 NODE_ENV=production 会让 react 解析到 cjs/react.production.js，
+# 该构建不导出 act，于是所有基于原生 DOM + act 的 React 集成测试报
+# "TypeError: act is not a function"。这里在测试预加载阶段恢复 bun 的默认语义，
+# 不改动、也不跳过任何测试。
+[test]
+preload = ["./test/setup/test-node-env.ts"]

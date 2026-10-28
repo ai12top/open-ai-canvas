@@ -1,0 +1,530 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "dreamina/5.0",
+      "object": "model",
+      "created": 1700000000,
+      "owned_by": "dreamina",
+      "name": "5.0",
+      "group": "即梦 (Dreamina)",
+      "type": "image",
+      "description": null,
+      "supported_sizes": [
+        "16:9",
+        "9:16",
+        "1:1",
+        "4:3",
+        "3:4"
+      ],
+      "enabled": true,
+      "modelType": "image",
+      "protocol": "dreamina-cli-image",
+      "capabilityConfig": {
+        "version": 1,
+        "image": {
+          "references": {
+            "promptMaxChars": 4000,
+            "minImages": 0,
+            "maxImages": 5,
+            "maxImageBytes": 20971520,
+            "maskSupported": false
+          },
+          "size": {
+            "parameter": "aspect_ratio",
+            "values": [
+              "16:9",
+              "1:1",
+              "9:16"
+            ],
+            "default": "1:1",
+            "allowCustom": false
+          },
+          "quality": {
+            "supported": true,
+            "values": [
+              "2k",
+              "4k"
+            ],
+            "default": "2k"
+          },
+          "maxOutputs": 1
+        }
+      },
+      "capabilityMeta": {
+        "schemaVersion": 1,
+        "revision": 12,
+        "status": "fresh",
+        "sourceVersion": "fixture-source:fixture",
+        "refreshedAt": 1761600000.0
+      }
+    },
+    {
+      "id": "dreamina/3.0-pro",
+      "object": "model",
+      "created": 1700000000,
+      "owned_by": "dreamina",
+      "name": "3.0 Pro",
+      "group": "即梦 (Dreamina)",
+      "type": "video",
+      "description": null,
+      "supported_sizes": [
+        "16:9",
+        "9:16",
+        "1:1",
+        "4:3",
+        "3:4"
+      ],
+      "enabled": true,
+      "modelType": "video",
+      "protocol": "dreamina-cli-video",
+      "capabilityConfig": {
+        "version": 1,
+        "video": {
+          "references": {
+            "promptMaxChars": 4000,
+            "minImages": 0,
+            "maxImages": 10,
+            "maxImageBytes": 20971520,
+            "maxVideos": 5,
+            "maxVideoBytes": 104857600,
+            "maxVideoDurationSeconds": 15,
+            "maxAudios": 3,
+            "maxAudioBytes": 15728640,
+            "maxAudioDurationSeconds": 600
+          },
+          "duration": {
+            "selection": "range",
+            "min": 2,
+            "max": 30,
+            "step": 1,
+            "default": 5
+          },
+          "ratios": [
+            "16:9",
+            "9:16"
+          ],
+          "defaultRatio": "16:9",
+          "resolutions": [
+            "720p",
+            "1080p"
+          ],
+          "defaultResolution": "720p",
+          "generateAudio": {
+            "supported": true,
+            "default": false
+          },
+          "watermark": {
+            "supported": false,
+            "default": false
+          },
+          "operations": [
+            "text_to_video",
+            "image_to_video",
+            "reference_to_video"
+          ],
+          "defaultOperation": "text_to_video"
+        }
+      },
+      "capabilityMeta": {
+        "schemaVersion": 1,
+        "revision": 12,
+        "status": "fresh",
+        "sourceVersion": "fixture-source:fixture",
+        "refreshedAt": 1761600000.0
+      }
+    },
+    {
+      "id": "libtv/seedream-4",
+      "object": "model",
+      "created": 1700000000,
+      "owned_by": "libtv",
+      "name": "Seedream 4",
+      "group": "哩布哩布 (LibTV)",
+      "type": "image",
+      "description": null,
+      "supported_sizes": [
+        "16:9",
+        "9:16",
+        "1:1",
+        "4:3",
+        "3:4"
+      ],
+      "enabled": true,
+      "modelType": "image",
+      "protocol": "libtv-image",
+      "capabilityConfig": {
+        "version": 1,
+        "image": {
+          "references": {
+            "promptMaxChars": 4000,
+            "minImages": 0,
+            "maxImages": 5,
+            "maxImageBytes": 20971520,
+            "maskSupported": false
+          },
+          "size": {
+            "parameter": "aspect_ratio",
+            "values": [
+              "16:9",
+              "1:1",
+              "9:16"
+            ],
+            "default": "1:1",
+            "allowCustom": false
+          },
+          "quality": {
+            "supported": true,
+            "values": [
+              "2k",
+              "4k"
+            ],
+            "default": "2k"
+          },
+          "maxOutputs": 1
+        }
+      },
+      "capabilityMeta": {
+        "schemaVersion": 1,
+        "revision": 12,
+        "status": "fresh",
+        "sourceVersion": "fixture-source:fixture",
+        "refreshedAt": 1761600000.0
+      }
+    },
+    {
+      "id": "libtv/kling-2.1",
+      "object": "model",
+      "created": 1700000000,
+      "owned_by": "libtv",
+      "name": "Kling 2.1",
+      "group": "哩布哩布 (LibTV)",
+      "type": "video",
+      "description": null,
+      "supported_sizes": [
+        "16:9",
+        "9:16",
+        "1:1",
+        "4:3",
+        "3:4"
+      ],
+      "enabled": true,
+      "modelType": "video",
+      "protocol": "libtv-video",
+      "capabilityConfig": {
+        "version": 1,
+        "video": {
+          "references": {
+            "promptMaxChars": 4000,
+            "minImages": 0,
+            "maxImages": 10,
+            "maxImageBytes": 20971520,
+            "maxVideos": 5,
+            "maxVideoBytes": 104857600,
+            "maxVideoDurationSeconds": 15,
+            "maxAudios": 3,
+            "maxAudioBytes": 15728640,
+            "maxAudioDurationSeconds": 600
+          },
+          "duration": {
+            "selection": "range",
+            "min": 2,
+            "max": 30,
+            "step": 1,
+            "default": 5
+          },
+          "ratios": [
+            "16:9",
+            "9:16"
+          ],
+          "defaultRatio": "16:9",
+          "resolutions": [
+            "720p",
+            "1080p"
+          ],
+          "defaultResolution": "720p",
+          "generateAudio": {
+            "supported": true,
+            "default": false
+          },
+          "watermark": {
+            "supported": false,
+            "default": false
+          },
+          "operations": [
+            "text_to_video",
+            "image_to_video",
+            "reference_to_video"
+          ],
+          "defaultOperation": "text_to_video"
+        }
+      },
+      "capabilityMeta": {
+        "schemaVersion": 1,
+        "revision": 12,
+        "status": "fresh",
+        "sourceVersion": "fixture-source:fixture",
+        "refreshedAt": 1761600000.0
+      }
+    },
+    {
+      "id": "qcreate/qwen3",
+      "object": "model",
+      "created": 1700000000,
+      "owned_by": "qcreate",
+      "name": "Qwen-Image 3.0",
+      "group": "通义造点 (QCreate)",
+      "type": "image",
+      "description": "真实细节，画面更自然",
+      "supported_sizes": [
+        "original",
+        "16:9",
+        "4:3",
+        "1:1",
+        "3:4",
+        "9:16",
+        "2:3",
+        "3:2"
+      ],
+      "enabled": true,
+      "modelType": "image",
+      "protocol": "qcreate-cli-image",
+      "capabilityConfig": {
+        "version": 1,
+        "image": {
+          "references": {
+            "promptMaxChars": 32000,
+            "maxImages": 2,
+            "maxImageBytes": 0,
+            "maskSupported": false
+          },
+          "size": {
+            "parameter": "aspect_ratio",
+            "values": [
+              "original",
+              "16:9",
+              "4:3",
+              "1:1",
+              "3:4",
+              "9:16",
+              "2:3",
+              "3:2"
+            ],
+            "default": "16:9",
+            "allowCustom": false,
+            "presets": []
+          },
+          "quality": {
+            "supported": true,
+            "values": [
+              "1K",
+              "1.5K",
+              "2K"
+            ],
+            "default": "1K"
+          },
+          "transparentBackground": {
+            "supported": false,
+            "default": false
+          },
+          "responseFormat": {
+            "supported": false
+          },
+          "outputFormat": {
+            "supported": false
+          },
+          "maxOutputs": 4
+        }
+      },
+      "capabilityMeta": {
+        "schemaVersion": 1,
+        "revision": 12,
+        "status": "fresh",
+        "sourceVersion": "fixture-source:fixture",
+        "refreshedAt": 1761600000.0
+      }
+    },
+    {
+      "id": "qcreate/wan30_prime",
+      "object": "model",
+      "created": 1700000000,
+      "owned_by": "qcreate",
+      "name": "Wan 3.0 Prime",
+      "group": "通义造点 (QCreate)",
+      "type": "video",
+      "description": "阿里最强模型，极速满血体验",
+      "supported_sizes": [
+        "9:16",
+        "4:3",
+        "1:1",
+        "3:4",
+        "16:9"
+      ],
+      "enabled": true,
+      "modelType": "video",
+      "protocol": "qcreate-cli-video",
+      "capabilityConfig": {
+        "version": 1,
+        "video": {
+          "references": {
+            "promptMaxChars": 8000,
+            "minImages": 0,
+            "maxImages": 10,
+            "maxImageBytes": 20971520,
+            "maxVideos": 5,
+            "maxVideoBytes": 104857600,
+            "maxVideoDurationSeconds": 30,
+            "maxAudios": 5,
+            "maxAudioBytes": 15728640,
+            "maxAudioDurationSeconds": 600
+          },
+          "duration": {
+            "selection": "range",
+            "min": 2,
+            "max": 30,
+            "step": 1,
+            "default": 15
+          },
+          "ratios": [
+            "9:16",
+            "4:3",
+            "1:1",
+            "3:4",
+            "16:9"
+          ],
+          "defaultRatio": "16:9",
+          "resolutions": [
+            "480P",
+            "720P",
+            "1080P"
+          ],
+          "defaultResolution": "720P",
+          "generateAudio": {
+            "supported": true,
+            "default": true
+          },
+          "watermark": {
+            "supported": false,
+            "default": false
+          },
+          "operations": [
+            "text_to_video",
+            "image_to_video",
+            "reference_to_video",
+            "audio_to_video"
+          ],
+          "defaultOperation": "text_to_video"
+        }
+      },
+      "capabilityMeta": {
+        "schemaVersion": 1,
+        "revision": 12,
+        "status": "fresh",
+        "sourceVersion": "fixture-source:fixture",
+        "refreshedAt": 1761600000.0
+      }
+    },
+    {
+      "id": "dreamina/4.0",
+      "object": "model",
+      "created": 1700000000,
+      "owned_by": "dreamina",
+      "name": "4.0",
+      "group": "即梦 (Dreamina)",
+      "type": "image",
+      "description": null,
+      "supported_sizes": [
+        "16:9",
+        "9:16",
+        "1:1",
+        "4:3",
+        "3:4"
+      ],
+      "enabled": true,
+      "modelType": "image",
+      "protocol": "dreamina-cli-image",
+      "capabilityConfig": null,
+      "capabilityMeta": {
+        "schemaVersion": 1,
+        "revision": 12,
+        "status": "stale",
+        "sourceVersion": "fixture-source:fixture",
+        "refreshedAt": 1761600000.0
+      }
+    },
+    {
+      "id": "libtv/wan-2.2",
+      "object": "model",
+      "created": 1700000000,
+      "owned_by": "libtv",
+      "name": "Wan 2.2",
+      "group": "哩布哩布 (LibTV)",
+      "type": "video",
+      "description": null,
+      "supported_sizes": [
+        "16:9",
+        "9:16",
+        "1:1",
+        "4:3",
+        "3:4"
+      ],
+      "enabled": true,
+      "modelType": "video",
+      "protocol": "libtv-video",
+      "capabilityConfig": null,
+      "capabilityMeta": {
+        "schemaVersion": 1,
+        "revision": 12,
+        "status": "unavailable",
+        "sourceVersion": "fixture-source:fixture",
+        "refreshedAt": 1761600000.0
+      }
+    },
+    {
+      "id": "dreamina/seedance-2.0",
+      "object": "model",
+      "created": 1700000000,
+      "owned_by": "dreamina",
+      "name": "Seedance 2.0",
+      "group": "即梦 (Dreamina)",
+      "type": "video",
+      "description": null,
+      "supported_sizes": [
+        "16:9",
+        "9:16",
+        "1:1",
+        "4:3",
+        "3:4"
+      ],
+      "enabled": true,
+      "modelType": "video",
+      "protocol": "",
+      "capabilityConfig": null,
+      "capabilityMeta": {
+        "schemaVersion": 1,
+        "revision": 12,
+        "status": "unavailable",
+        "sourceVersion": "",
+        "refreshedAt": null
+      }
+    },
+    {
+      "id": "dreamina-image-3.0",
+      "object": "model",
+      "owned_by": "dreamina",
+      "enabled": true
+    },
+    {
+      "id": "dreamina-video-3.0",
+      "object": "model",
+      "owned_by": "dreamina",
+      "enabled": true
+    }
+  ],
+  "_generated": {
+    "script": "web/test/fixtures/generate-capability-directory.py",
+    "note": "由宿主真实 Python 能力映射离线生成（model_catalog -> model_directory -> model_api），不含 CLI 调用、网络或凭据；不要手改，改契约请重跑脚本。",
+    "revision": 12,
+    "refreshedAt": 1761600000
+  }
+}

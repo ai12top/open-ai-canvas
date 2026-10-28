@@ -5,9 +5,10 @@ import { useState, type ReactNode } from "react";
 import { ModelEditorModal } from "@/components/model-editor-modal";
 import { ChannelHeadersEditor, validateChannelHeaders } from "@/components/channel-headers-editor";
 import { WorkspaceState } from "@/components/layout/workspace-state";
-import { mergeFetchedChannelModelCosts } from "@/lib/channel-model-catalog";
-import { fetchChannelModels } from "@/services/api/image";
+import { applyFetchedChannelModelCatalog, type ChannelModelSkip } from "@/lib/channel-model-catalog";
+import { fetchChannelModels, type ChannelModelFetchResult } from "@/services/api/image";
 import {
+    channelConnectionSignature,
     createModelChannel,
     defaultBaseUrlForApiFormat,
     filterModelsByCapability,
@@ -105,10 +106,13 @@ export function ChannelSettingsPane({ onOpenModels, onOpenRunningHub }: ChannelS
                 message.warning(`${latestChannel.name || "当前渠道"}的连接配置已改变，已忽略旧的拉取结果`);
                 return;
             }
+            const applied = mergedChannelWithCatalog(latestChannel, result);
             updateChannels(
-                latestConfig.channels.map((item) => (item.id === channel.id ? { ...item, models: result.models, modelCosts: mergeFetchedChannelModelCosts(item, result.catalog) } : item)),
+                latestConfig.channels.map((item) => (item.id === channel.id ? applied.channel : item)),
                 latestConfig,
             );
+            const skipNotice = capabilitySkipNotice(latestChannel.name || "当前渠道", applied.skipped);
+            if (skipNotice) message.warning(skipNotice);
             message.success(`${latestChannel.name || "当前渠道"}模型列表已更新`);
         } catch (error) {
             message.error(channelModelFetchErrorMessage(error));
@@ -149,13 +153,19 @@ export function ChannelSettingsPane({ onOpenModels, onOpenRunningHub }: ChannelS
             const failed = results.filter((item) => !item.result.models.length);
             if (successful.length) {
                 const resultMap = new Map(successful.map((item) => [item.channel.id, item.result] as const));
+                const skippedNotices: string[] = [];
                 updateChannels(
                     latestConfig.channels.map((channel) => {
                         const fetched = resultMap.get(channel.id);
-                        return fetched ? { ...channel, models: fetched.models, modelCosts: mergeFetchedChannelModelCosts(channel, fetched.catalog) } : channel;
+                        if (!fetched) return channel;
+                        const applied = mergedChannelWithCatalog(channel, fetched);
+                        const notice = capabilitySkipNotice(channel.name || "未命名渠道", applied.skipped);
+                        if (notice) skippedNotices.push(notice);
+                        return applied.channel;
                     }),
                     latestConfig,
                 );
+                if (skippedNotices.length) message.warning(skippedNotices.join("；"));
                 message.success(`已更新 ${successful.length} 个渠道的模型`);
             }
             const warnings = [
@@ -339,6 +349,26 @@ function channelModelFetchErrorMessage(error: unknown) {
     return `${detail}；也可以直接在模型列表中手动输入模型名`;
 }
 
+/** 单个与批量拉取共用同一份合并逻辑：models 与 modelCosts 从同一批过滤后的候选得出。 */
+function mergedChannelWithCatalog(channel: ModelChannel, result: ChannelModelFetchResult) {
+    const applied = applyFetchedChannelModelCatalog(channel, result.catalog, { selectedProtocol: channel.interfaceType });
+    return {
+        channel: { ...channel, models: applied.models, modelCosts: applied.modelCosts },
+        skipped: applied.skipped,
+    };
+}
+
+/** 没自动填参的模型要说清原因，而不是静默地什么都不发生。 */
+function capabilitySkipNotice(name: string, skipped: ChannelModelSkip[]) {
+    if (!skipped.length) return "";
+    const detail = skipped
+        .slice(0, 3)
+        .map((item) => `${item.model}：${item.reason}`)
+        .join("；");
+    const more = skipped.length > 3 ? ` 等 ${skipped.length} 个模型` : "";
+    return `${name}有 ${skipped.length} 个模型未自动填参（${detail}${more}），已保留原有手配与价格`;
+}
+
 function channelConnectionError(channel: ModelChannel) {
     const baseUrl = channel.baseUrl.trim();
     if (!baseUrl) return "请填写 Base URL";
@@ -352,10 +382,6 @@ function channelConnectionError(channel: ModelChannel) {
     if (!channel.apiKey.trim()) return "请填写 API Key / Access Key";
     if (requiresSecretKey(channel) && !channel.secretKey?.trim()) return "当前协议需要填写 Secret Key";
     return "";
-}
-
-function channelConnectionSignature(channel: ModelChannel) {
-    return [channel.baseUrl.trim(), channel.apiKey.trim(), channel.secretKey?.trim() || "", channel.apiFormat, JSON.stringify(channel.headers || [])].join("\n");
 }
 
 function channelProtocolLabel(channel: ModelChannel) {

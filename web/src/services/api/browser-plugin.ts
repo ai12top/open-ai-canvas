@@ -39,17 +39,60 @@ export async function resolveBrowserPlugin(config: ChannelTransportConfig, capab
     requireBrowserPluginConfig(config);
     const providerId = (config.interfaceType || "").trim();
     if (!providerId) throw new Error("请先选择浏览器可执行的声明式插件协议");
-    const builtin = PERSONAL_OPENAI_PROTOCOLS.has(providerId);
-    const providers = await fetchPluginProviderCatalog("user.custom-channel", capability);
-    const selected = providers.find((item) => item.value === providerId);
-    const manifest = selected?.browserManifest as BrowserPluginManifest | undefined;
-    if (!manifest) {
-        if (!selected && builtin) return undefined;
-        throw new Error(selected?.browserUnsupportedReason || `当前渠道未提供${capability === "image" ? "图片" : "视频"}能力的声明式插件`);
+    const identity = await lookupBrowserPlugin(config, [capability]);
+    if (!identity.manifest) {
+        if (!identity.found && identity.builtin) return undefined;
+        throw new Error(identity.unsupportedReason || `当前渠道未提供${capability === "image" ? "图片" : "视频"}能力的声明式插件`);
     }
+    const manifest = identity.manifest;
     const description = await callBrowserProtocol<BrowserProtocolDescription>({ op: "describe", manifest, providerId, baseUrl: pluginBaseUrl(config) });
     if (description.operations?.create !== true) throw new Error("所选插件没有声明创建操作");
     return manifest;
+}
+
+/** catalog 身份查找结果：同名 provider 是否在能力目录里出现、是否内置标准协议名。 */
+type CatalogPluginIdentity = { providerId: string; builtin: boolean; found: boolean; manifest?: BrowserPluginManifest; unsupportedReason?: string };
+
+/**
+ * 目录身份查找：catalog 里同名 provider 优先于内置协议名，能力按声明过滤。
+ * 目录不可达时照抛，由调用方决定内置标准协议能否降级，未知协议不得因目录故障被放行。
+ */
+async function lookupBrowserPlugin(config: ChannelTransportConfig, capabilities: readonly BrowserPluginCapability[]): Promise<CatalogPluginIdentity> {
+    const providerId = (config.interfaceType || "").trim();
+    const builtin = PERSONAL_OPENAI_PROTOCOLS.has(providerId);
+    for (const capability of capabilities) {
+        const providers = await fetchPluginProviderCatalog("user.custom-channel", capability);
+        const selected = providers.find((item) => item.value === providerId);
+        if (selected) return { providerId, builtin, found: true, manifest: selected.browserManifest as BrowserPluginManifest | undefined, unsupportedReason: selected.browserUnsupportedReason };
+    }
+    return { providerId, builtin, found: false };
+}
+
+/**
+ * 模型目录这类只读端点的插件鉴权投影：声明式插件可能只声明图片或视频能力，任一命中即放行。
+ * 鉴权头由 preparePluginHTTP 走同一份 Go 规则生成（header/api-key/basic/none），调用方不另写规则。
+ * 内置标准协议在目录不可达或没有同名插件时返回 undefined，沿用既有 Bearer；
+ * 其它协议必须由目录确认已安装且可浏览器执行，否则报错而不是放行。
+ */
+export async function browserPluginModelAuthHeaders(config: ChannelTransportConfig): Promise<Record<string, string> | undefined> {
+    requireBrowserPluginConfig(config);
+    const providerId = (config.interfaceType || "").trim();
+    if (!providerId) return undefined;
+    // 目录故障时只有内置标准协议可按既有行为降级；未知协议不能被放行。
+    const builtin = PERSONAL_OPENAI_PROTOCOLS.has(providerId);
+    let identity: CatalogPluginIdentity;
+    try {
+        identity = await lookupBrowserPlugin(config, ["image", "video"]);
+    } catch (error) {
+        if (!builtin) throw error;
+        return undefined;
+    }
+    if (!identity.manifest) {
+        if (!identity.found && builtin) return undefined;
+        throw new Error(identity.unsupportedReason || "当前渠道未提供图片或视频能力的声明式插件");
+    }
+    const { headers } = await preparePluginHTTP(config, identity.manifest, { method: "GET", path: "/models" });
+    return headers;
 }
 
 /** 创建任务：Go 组请求 → 浏览器直连 → Go 解析。异步任务的 taskId 放进结果里。 */
