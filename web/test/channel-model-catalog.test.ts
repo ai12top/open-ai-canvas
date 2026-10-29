@@ -14,7 +14,7 @@ import { fetchChannelModels } from "../src/services/api/image";
 import { apiClient } from "../src/services/api/request";
 import { fetchPluginProviderCatalog } from "../src/services/api/plugin-catalog";
 import { createVideoGenerationTask } from "../src/services/api/video";
-import { createModelChannel, defaultConfig, modelDisplayName, normalizeConfigSnapshot, resolveModelRequestConfig, selectableModelsByCapability, type AiConfig } from "../src/stores/use-config-store";
+import { channelConnectionSignature, createModelChannel, defaultConfig, modelDisplayName, normalizeConfigSnapshot, resolveModelRequestConfig, selectableModelsByCapability, type AiConfig } from "../src/stores/use-config-store";
 
 const originalAxiosRequest = axios.request;
 const originalApiRequest = apiClient.request;
@@ -131,7 +131,7 @@ describe("public channel model catalog", () => {
                 },
             },
         })) as typeof apiClient.request;
-        const channel = createModelChannel({ baseUrl: "https://flow.example", apiKey: "synthetic-test-key", models: [] });
+        const channel = createModelChannel({ scope: "system", baseUrl: "https://flow.example", apiKey: "synthetic-test-key", models: [] });
 
         const result = await fetchChannelModels(channel, true);
 
@@ -140,6 +140,17 @@ describe("public channel model catalog", () => {
         expect(result.models).not.toContain("omni_portrait_10s");
         expect(result.catalog.find((item) => item.id === "omni")).toEqual(omniCatalog);
         expect(result.catalog.find((item) => item.id === "omni")).not.toHaveProperty("compatibilityMap");
+    });
+
+    test("a protocol switch during model discovery changes the connection signature", () => {
+        const channel = createModelChannel({ id: "personal", scope: "user", apiFormat: "openai", baseUrl: "https://personal.example/v1", apiKey: "synthetic-test-key", models: [], interfaceType: "chat-completion" });
+
+        // 拉取在飞行中切换协议：签名必须变化，否则旧响应会被写回新协议的模型列表。
+        expect(channelConnectionSignature({ ...channel, interfaceType: "openai-image" })).not.toBe(channelConnectionSignature({ ...channel, interfaceType: "openai-video" }));
+        expect(channelConnectionSignature({ ...channel, interfaceType: "openai-image" })).toBe(channelConnectionSignature({ ...channel, interfaceType: "openai-image" }));
+        // 其它连接字段仍然参与签名。
+        expect(channelConnectionSignature({ ...channel, apiKey: " other-key " })).not.toBe(channelConnectionSignature(channel));
+        expect(channelConnectionSignature({ ...channel, headers: [{ name: "x-tenant", value: "acme" }] })).not.toBe(channelConnectionSignature(channel));
     });
 
     test("maps Omni metadata to friendly video/NewAPI configuration with 8/10 seconds and both ratios", () => {

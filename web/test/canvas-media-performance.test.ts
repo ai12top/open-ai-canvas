@@ -28,6 +28,10 @@ const canvasProjectSource = moduleGroupSource("pages/canvas/project.tsx");
 const globalStylesSource = readFileSync(resolve(import.meta.dir, "../src/styles/globals.css"), "utf8");
 const resourceBlobCacheSource = readFileSync(resolve(import.meta.dir, "../src/services/resource-blob-cache.ts"), "utf8");
 const resourceApiSource = readFileSync(resolve(import.meta.dir, "../src/services/api/resources.ts"), "utf8");
+const imageToolSource = readFileSync(resolve(import.meta.dir, "../src/hooks/use-image-tool-source.ts"), "utf8");
+const canvasMediaDialogsSource = readFileSync(resolve(import.meta.dir, "../src/pages/canvas/canvas-project-media-dialogs.tsx"), "utf8");
+const cropDialogSource = readFileSync(resolve(import.meta.dir, "../src/components/image-crop-dialog.tsx"), "utf8");
+const regionEditDialogSource = readFileSync(resolve(import.meta.dir, "../src/components/canvas/canvas-node-region-edit-dialog.tsx"), "utf8");
 
 function node(id: string, type: CanvasNodeType): CanvasNodeData {
     return { id, type, title: id, position: { x: 0, y: 0 }, width: 320, height: 180, metadata: {} };
@@ -109,6 +113,20 @@ describe("large canvas media rendering", () => {
         // 短剧成片下载走授权下载地址，不把大视频读进 Blob。
         expect(dramaSharedSource).toContain('getResourceAccess(`resource:${resourceId}`, "download"');
         expect(dramaSharedSource).not.toContain("response.blob()");
+    });
+
+    test("revalidates full Blob reads instead of reusing an opaque display cache entry", () => {
+        expect(resourceApiSource).toContain('mode: "cors", cache: "no-cache"');
+    });
+
+    test("loads crop and region editor previews from the authenticated resource Blob", () => {
+        expect(canvasMediaDialogsSource).toContain("storageKey={cropNode.metadata.storageKey}");
+        // 局部重绘在官方 v1.7.3 已换成 region edit 对话框，它自己按 image.storageKey 读 Blob。
+        expect(canvasMediaDialogsSource).toContain("storageKey: regionEditNode.metadata.storageKey");
+        expect(regionEditDialogSource).toContain("imageToDataUrl({ url: image.url, storageKey: image.storageKey })");
+        expect(imageToolSource).toContain("getImageBlob(storageKey)");
+        expect(imageToolSource).toContain("prepareRasterSource(source, storageKey ?");
+        expect(cropDialogSource).toContain('src={displaySource} alt="待裁剪图片"');
     });
 
     test("merges concurrent full Blob consumers before starting the download", () => {

@@ -697,7 +697,10 @@ func capabilitySpecWithPriceTiers(spec CapabilitySpec, channelModel model.Channe
 		}
 	}
 	if !hasDurationWildcard && len(durations) > 0 {
-		result.Options["videoSeconds"] = OptionConstraint{Values: durations}
+		// 时长不可选的模型（跟输入素材）不声明 videoSeconds，价格档不能把它变回用户选项。
+		if _, declared := spec.Options["videoSeconds"]; declared {
+			result.Options["videoSeconds"] = OptionConstraint{Values: durations}
+		}
 	}
 	return result
 }
@@ -731,7 +734,9 @@ func channelModelDefaultOptions(channelModel model.ChannelModel, spec Capability
 			}
 		case "video":
 			if config.Video != nil {
-				defaults["videoSeconds"] = config.Video.Duration.Default
+				if videoDurationSupported(config.Video) {
+					defaults["videoSeconds"] = config.Video.Duration.Default
+				}
 				defaults["vquality"] = normalizeChannelModelTierResolution(config.Video.DefaultResolution)
 				if len(config.Video.Ratios) > 0 {
 					defaults["size"] = config.Video.DefaultRatio
@@ -754,7 +759,7 @@ func channelModelDefaultOptions(channelModel model.ChannelModel, spec Capability
 			if tier.Resolution != "*" {
 				defaults["vquality"] = normalizeChannelModelTierResolution(tier.Resolution)
 			}
-			if tier.VideoSeconds > 0 {
+			if tier.VideoSeconds > 0 && (config == nil || videoDurationSupported(config.Video)) {
 				defaults["videoSeconds"] = tier.VideoSeconds
 			}
 			break

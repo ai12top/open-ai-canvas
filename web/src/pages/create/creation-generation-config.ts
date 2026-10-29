@@ -11,12 +11,11 @@ export function creationVideoConfig(config: AiConfig, model: string, settings: P
         seconds: settings.seconds,
         resolution: settings.videoQuality,
     });
-    return {
+    const next: AiConfig = {
         ...config,
         model,
         videoModel: model,
         size: normalized.ratio,
-        videoSeconds: normalized.seconds,
         vquality: normalized.resolution.replace(/p$/i, ""),
         ...resolveModelVideoBooleanOptions(
             config,
@@ -28,4 +27,8 @@ export function creationVideoConfig(config: AiConfig, model: string, settings: P
             },
         ),
     };
+    // 模型没有时长参数时不能把全局默认的 videoSeconds 顺手带进请求，否则隐藏了时长旋钮也照样发秒数。
+    if (normalized.seconds !== undefined) next.videoSeconds = normalized.seconds;
+    else delete (next as Partial<AiConfig>).videoSeconds;
+    return next;
 }

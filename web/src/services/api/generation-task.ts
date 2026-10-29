@@ -1,3 +1,6 @@
+import { submitBrowserGeneration, isPersonalGeneration } from "@/services/browser-generation-runner";
+import { requestToolResponse } from "@/services/api/image";
+import { assertPersonalOpenAIConfig } from "@/lib/personal-channel";
 import { createClientUUID } from "@/lib/client-id";
 import { normalizeAudioFormatForConfig, normalizeAudioVoiceForConfig } from "@/lib/audio-generation";
 import { imageParameterRequest } from "@/lib/image-parameters";
@@ -5,7 +8,7 @@ import { getMediaBlob } from "@/services/file-storage";
 import { getImageBlob } from "@/services/image-storage";
 import { resourceIdFromStorageKey, resourceStorageKey, uploadResourceFile } from "@/services/api/resources";
 import { createGenerationTask, waitForGenerationTask, type GenerationTask, type CreateTaskInput } from "@/services/api/task-center";
-import { modelCapabilityConfigFor } from "@/lib/model-capabilities";
+import { modelCapabilityConfigFor, videoDurationSupported } from "@/lib/model-capabilities";
 import { grokImagePromptLimitError } from "@/lib/grok-image-prompt-limit";
 import { resolveGenerationWorkflowExecution, type GenerationWorkflowExecution } from "@/lib/generation-workflow-execution";
 import { isArkPlanBaseUrl } from "@/lib/seedance-video";
@@ -32,7 +35,7 @@ export type BackendGenerationResult = {
     reasoning?: string;
 };
 
-type BackendGenerationTaskOptions = {
+export type BackendGenerationTaskOptions = {
     projectId?: string;
     mode: BackendGenerationMode;
     prompt: string;
@@ -98,6 +101,12 @@ export async function runBackendGenerationTask(
     dependencies: GenerationTaskDependencies = defaultDependencies,
 ) {
     throwIfAborted(signal);
+    const browserOptions = { projectId, mode, prompt, config, referenceImages, referenceVideos, referenceAudios, textHistory, mask, signal, metadata, onTaskUpdate, onTextDelta, streamText, enableThinking, clientOperationId, retryOf, attemptGroupId };
+    if (isPersonalGeneration(browserOptions)) {
+        const task = await submitBrowserGeneration(browserOptions);
+        onTaskUpdate?.(task);
+        return parseBackendGenerationResult(await waitForGenerationTask(task.id, { signal, initialTask: task, onTaskUpdate }));
+    }
     assertClientPromptLimit(mode, prompt, config, metadata);
     assertBackendRuntimeConfigured(config, mode);
     const prepared = await prepareGenerationReferences({ config, mode, referenceImages, referenceVideos, referenceAudios, mask });
@@ -112,6 +121,7 @@ export async function submitBackendGenerationTask(
     dependencies: GenerationTaskDependencies = defaultDependencies,
 ): Promise<GenerationTask> {
     throwIfAborted(options.signal);
+    if (isPersonalGeneration(options)) return submitBrowserGeneration(options);
     assertClientPromptLimit(options.mode, options.prompt, options.config, options.metadata);
     assertBackendRuntimeConfigured(options.config, options.mode);
     const prepared = await prepareGenerationReferences(options);
@@ -134,6 +144,7 @@ type BackendToolGenerationOptions = {
 // 报价和执行复用完全相同的任务协议，准备阶段不提交模型任务。
 export function prepareBackendToolGenerationTask(options: BackendToolGenerationOptions): CreateTaskInput {
     throwIfAborted(options.signal);
+    if (resolveModelRequestConfig(options.config, options.config.model).channelScope === "user") throw new Error("个人渠道无法创建服务端报价任务，请使用浏览器直接执行入口");
     const logicalModelId = logicalModelIDForConfig(options.config);
     const requestConfig = resolveModelRequestConfig(options.config, options.config.model);
     const capability = modelCapabilityConfigFor(options.config, requestConfig.model).text;
@@ -172,6 +183,11 @@ export function prepareBackendToolGenerationTask(options: BackendToolGenerationO
 }
 
 export async function runBackendToolGenerationTask(options: BackendToolGenerationOptions): Promise<ToolResponseResult> {
+    const directConfig = resolveModelRequestConfig(options.config, options.config.model);
+    if (directConfig.channelScope === "user") {
+        assertPersonalOpenAIConfig(directConfig);
+        return requestToolResponse(directConfig, options.messages, options.tools, options.toolChoice, options.onDelta, { signal: options.signal });
+    }
     const task = await createGenerationTask(prepareBackendToolGenerationTask(options));
     options.onTaskCreated?.(task);
     const completed = await waitForGenerationTask(task.id, { signal: options.signal, initialTask: task, onTextDelta: options.onDelta });
@@ -186,6 +202,7 @@ export async function runBackendToolGenerationTask(options: BackendToolGeneratio
 export async function runBackendGenerationTaskBatch(options: BackendGenerationTaskOptions & { count: number }, dependencies: GenerationTaskDependencies = defaultDependencies) {
     const count = Math.max(1, Math.min(15, Math.floor(Number(options.count)) || 1));
     throwIfAborted(options.signal);
+    if (isPersonalGeneration(options)) return Promise.allSettled(Array.from({ length: count }, (_, batchIndex) => runBackendGenerationTask({ ...options, clientOperationId: `${options.clientOperationId || createClientUUID()}:${batchIndex}`, metadata: { ...options.metadata, batchIndex, batchCount: count } })));
     assertClientPromptLimit(options.mode, options.prompt, options.config, options.metadata);
     if (options.retryContextsByBatchIndex && options.retryContextsByBatchIndex.length !== count) throw new Error("生成重试批次任务数量不匹配");
     const prepared = await prepareGenerationReferences(options);
@@ -278,6 +295,7 @@ async function createBackendGenerationTask(options: BackendGenerationTaskOptions
 
 export async function prepareBackendGenerationTask(options: BackendGenerationTaskOptions): Promise<CreateTaskInput> {
     throwIfAborted(options.signal);
+    if (isPersonalGeneration(options)) throw new Error("个人渠道必须由浏览器执行，不能创建服务端生成请求");
     assertClientPromptLimit(options.mode, options.prompt, options.config, options.metadata);
     assertBackendRuntimeConfigured(options.config, options.mode);
     const prepared = await prepareGenerationReferences(options);
@@ -409,7 +427,10 @@ function backendMediaReference<T extends ReferenceVideo | ReferenceAudio>(media:
 export function backendProviderConfig(config: AiConfig, mode: BackendGenerationMode = "image") {
     const requestConfig = resolveModelRequestConfig(config, config.model);
     const workflow = resolveGenerationWorkflowExecution(config, mode);
+    if (!workflow && requestConfig.channelScope === "user") throw new Error("个人渠道密钥不得写入服务端任务");
     if (workflow) return workflowProviderConfig(config, requestConfig, workflow);
+    const profile = modelCapabilityConfigFor(config, requestConfig.model);
+    const durationSupported = mode === "video" ? videoDurationSupported(profile.video) : true;
     const generationOptions = {
         ...(mode === "image" ? { imageParameters: imageParameterRequest(modelCapabilityConfigFor(config, config.model).image!, config, true) } : {}),
         size: config.size,
@@ -417,7 +438,7 @@ export function backendProviderConfig(config: AiConfig, mode: BackendGenerationM
         quality: omittedImageQuality(config.quality),
         transparentBackground: config.transparentBackground,
         count: config.count,
-        videoSeconds: config.videoSeconds,
+        ...(durationSupported ? { videoSeconds: config.videoSeconds } : {}),
         vquality: config.vquality,
         videoGenerateAudio: config.videoGenerateAudio,
         videoWatermark: config.videoWatermark,
@@ -440,7 +461,7 @@ export function backendProviderConfig(config: AiConfig, mode: BackendGenerationM
         secretKey: requestConfig.secretKey,
         model: requestConfig.model,
         ...generationOptions,
-        capabilityConfig: modelCapabilityConfigFor(config, requestConfig.model),
+        capabilityConfig: profile,
         systemPrompt: config.systemPrompt,
     };
 }
@@ -495,17 +516,26 @@ function workflowPublicExecution(workflow: GenerationWorkflowExecution) {
     };
 }
 
-function logicalCapabilityOptions(config: AiConfig, mode: BackendGenerationMode) {
+export function logicalCapabilityOptions(config: AiConfig, mode: BackendGenerationMode) {
     if (mode === "image") {
         const values = imageParameterRequest(modelCapabilityConfigFor(config, config.model).image!, config, true);
         if (values) return values;
     }
     const channel = resolveModelChannel(config, config.model);
-    const spec = channel.modelCosts?.find((item) => item.model === modelOptionName(config.model))?.logicalCapabilitySpec;
+    const modelCost = channel.modelCosts?.find((item) => item.model === modelOptionName(config.model));
+    const spec = modelCost?.logicalCapabilitySpec;
+    const profile = modelCapabilityConfigFor(config, config.model);
+    const durationSupported = mode === "video" ? videoDurationSupported(profile.video) : true;
     const candidates: Record<string, unknown> = mode === "image"
         ? { size: config.size, quality: omittedImageQuality(config.quality), transparentBackground: config.transparentBackground === "true", count: Number(config.count) }
         : mode === "video"
-            ? { size: config.size, videoSeconds: Number(config.videoSeconds), vquality: config.vquality, videoGenerateAudio: config.videoGenerateAudio === "true", videoWatermark: config.videoWatermark === "true" }
+            ? {
+                size: config.size,
+                ...(durationSupported ? { videoSeconds: Number(config.videoSeconds) } : {}),
+                vquality: config.vquality,
+                videoGenerateAudio: config.videoGenerateAudio === "true",
+                videoWatermark: config.videoWatermark === "true",
+            }
             : mode === "audio"
                 ? { audioVoice: config.audioVoice, audioFormat: config.audioFormat, audioSpeed: Number(config.audioSpeed), audioLanguage: config.audioLanguage, audioDialect: config.audioDialect }
                 : {};

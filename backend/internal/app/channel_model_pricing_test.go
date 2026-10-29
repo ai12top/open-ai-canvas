@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -32,6 +33,30 @@ func seedRepricingModels(t *testing.T) (*Service, *gorm.DB, *model.User) {
 
 func repricingRequest(id string, price int64) ChannelModelRepriceRequest {
 	return ChannelModelRepriceRequest{ModelID: id, PriceVersion: 1, PriceTiers: []ChannelModelTierRepriceRequest{{ID: "tier-" + id, PriceVersion: 1, Prices: map[string]*int64{"unitPriceMicrocredits": &price}}}}
+}
+
+func TestValidateChannelModelTierCapabilitiesKeepsLegacyInputDrivenDurationTiers(t *testing.T) {
+	config := DefaultModelCapabilityConfigForModel(string(model.ChannelInterfaceNewAPIChannel2), "motion-control")
+	unsupported := false
+	config.Video.DurationSupported = &unsupported
+	raw, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tiers := []model.ChannelModelPriceTier{{Resolution: "*", VideoSeconds: 30}}
+	if err := validateChannelModelTierCapabilities(tiers, string(raw), "video", string(model.ChannelInterfaceNewAPIChannel2)); err != nil {
+		t.Fatalf("legacy non-zero duration tier rejected: %v", err)
+	}
+	for _, billingMode := range []string{"fixed_request", "per_second", "token"} {
+		input := ChannelModelPriceTierRequest{
+			BillingMode: billingMode, UnitPriceMicrocredits: 100, InputTokenPriceMicrocredits: 0,
+			OutputTokenPriceMicrocredits: 100, CachedTokenPriceMicrocredits: 0, PriceConfigured: true,
+			CostPricing: model.CreditCostPricing{Configured: true, UnitPriceMicrocredits: 100},
+		}
+		if err := validateChannelModelTierPricing("video", model.ChannelInterfaceNewAPIChannel2, billingMode, input); err != nil {
+			t.Fatalf("legacy %s billing semantics changed: %v", billingMode, err)
+		}
+	}
 }
 
 func TestRepriceAdminChannelModelsPreservesFinalManualPrices(t *testing.T) {

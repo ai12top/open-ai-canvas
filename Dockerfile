@@ -1,5 +1,12 @@
 # syntax=docker/dockerfile:1.7
 
+# 与后端使用同一 Go 协议核心；运行镜像仅携带 WASM 静态产物。
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS browser-protocol-build
+WORKDIR /app
+COPY backend ./backend
+COPY scripts/build-browser-protocol.sh ./scripts/build-browser-protocol.sh
+RUN --mount=type=cache,target=/root/.cache/go-build GOTOOLCHAIN=local sh scripts/build-browser-protocol.sh /out
+
 # 构建 Vite 前端产物。
 FROM --platform=$BUILDPLATFORM oven/bun:1.3.9 AS web-build
 
@@ -11,6 +18,8 @@ COPY CHANGELOG.md /app/CHANGELOG.md
 COPY README.md /app/README.md
 COPY assets /app/assets
 COPY web ./
+COPY --from=browser-protocol-build /out ./public/browser-protocol
+ENV CANVAS_BROWSER_PROTOCOL_PREBUILT=1
 ARG VITE_TLDRAW_LICENSE_KEY
 ARG BUILD_VERSION
 ARG BUILD_COMMIT=unknown

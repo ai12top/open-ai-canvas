@@ -22,6 +22,7 @@ import (
 
 	"yingce/backend/internal/model"
 	"yingce/backend/internal/platform"
+	"yingce/backend/internal/protocol"
 )
 
 func postGeminiJSON(ctx context.Context, config providerConfig, path string, body interface{}, target interface{}) error {
@@ -116,17 +117,12 @@ func postJSON(ctx context.Context, config providerConfig, path string, body inte
 	return doJSON(req, target)
 }
 
+// applyProviderAuth 在 manifest 未声明鉴权时按 apiFormat 写默认头；具体规则由
+// protocol.DefaultAuthHeaders 提供，与浏览器插件执行共用同一份实现。
 func applyProviderAuth(req *http.Request, config providerConfig) {
-	if config.APIFormat == "claude" {
-		req.Header.Set("x-api-key", config.APIKey)
-		req.Header.Set("anthropic-version", "2023-06-01")
-		return
+	for _, header := range protocol.DefaultAuthHeaders(config.APIFormat, protocolAuthCredentials(config)) {
+		req.Header.Set(header.Name, header.Value)
 	}
-	if config.APIFormat == "gemini" {
-		req.Header.Set("x-goog-api-key", config.APIKey)
-		return
-	}
-	req.Header.Set("Authorization", "Bearer "+config.APIKey)
 }
 
 func postForm(ctx context.Context, config providerConfig, path string, contentType string, body io.Reader, target interface{}) error {

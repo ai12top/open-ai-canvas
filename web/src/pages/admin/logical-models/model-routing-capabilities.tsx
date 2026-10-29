@@ -6,7 +6,7 @@ import type { ReactNode } from "react";
 
 import type { CapabilityImageSize, CapabilitySpec, OptionConstraint } from "@/services/api/logical-models";
 import type { ChannelModel } from "@/services/api/wallet";
-import { STANDARD_IMAGE_SIZE_VALUES } from "@/lib/model-capabilities";
+import { STANDARD_IMAGE_SIZE_VALUES, videoDurationSupported } from "@/lib/model-capabilities";
 import { imageSizePresets } from "@/lib/image-size-presets";
 import { Select } from "@/components/ui/base/select";
 import { ImageParameterInput } from "@/components/image-parameter-fields";
@@ -130,7 +130,11 @@ export function capabilitySpecFromChannelModel(item?: ChannelModel): CapabilityS
     if (capability === "video") {
         const video = item.capabilityConfig?.video;
         if (!video) return null;
-        const duration: OptionConstraint = video.duration.selection === "enum" ? { values: video.duration.values || [] } : { min: video.duration.min, max: video.duration.max, step: video.duration.step };
+        const duration: OptionConstraint | undefined = !videoDurationSupported(video)
+            ? undefined
+            : video.duration.selection === "enum"
+            ? { values: video.duration.values || [] }
+            : { min: video.duration.min, max: video.duration.max, step: video.duration.step };
         return {
             version: 1,
             capability,
@@ -141,7 +145,7 @@ export function capabilitySpecFromChannelModel(item?: ChannelModel): CapabilityS
                 audio: { min: 0, max: video.references.maxAudios },
             }),
             options: compactOptions({
-                videoSeconds: duration,
+                ...(videoDurationSupported(video) ? { videoSeconds: duration } : {}),
                 size: { values: video.ratios },
                 vquality: video.resolutions.length ? { values: video.resolutions } : undefined,
                 videoGenerateAudio: { values: video.generateAudio.supported ? [false, true] : [false] },

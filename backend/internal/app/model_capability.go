@@ -269,6 +269,9 @@ func NormalizeModelCapabilityConfigForModel(capability string, protocol string, 
 		return nil, BadAuthRequest("请配置视频模型能力参数")
 	}
 	video := applyModelSpecificVideoCapability(input.Video, protocol, modelName)
+	if !videoDurationSupported(video) {
+		video.Duration = unsupportedVideoDuration()
+	}
 	if strings.TrimSpace(protocol) == "autodl-comfyui" {
 		var err error
 		video, err = normalizeAutoDLVideoScreenSpec(video, modelName)
@@ -459,14 +462,16 @@ func CapabilitySpecFromModelCapabilityConfig(config *ModelCapabilityConfig, capa
 		addInputConstraint(spec.Inputs, "image", video.References.MinImages, video.References.MaxImages)
 		addInputConstraint(spec.Inputs, "video", 0, video.References.MaxVideos)
 		addInputConstraint(spec.Inputs, "audio", 0, video.References.MaxAudios)
-		if video.Duration.Selection == "enum" {
-			values := make([]any, 0, len(video.Duration.Values))
-			for _, value := range video.Duration.Values {
-				values = append(values, value)
+		if videoDurationSupported(video) {
+			if video.Duration.Selection == "enum" {
+				values := make([]any, 0, len(video.Duration.Values))
+				for _, value := range video.Duration.Values {
+					values = append(values, value)
+				}
+				spec.Options["videoSeconds"] = OptionConstraint{Values: values}
+			} else {
+				spec.Options["videoSeconds"] = numericRange(float64(video.Duration.Min), float64(video.Duration.Max), float64(video.Duration.Step))
 			}
-			spec.Options["videoSeconds"] = OptionConstraint{Values: values}
-		} else {
-			spec.Options["videoSeconds"] = numericRange(float64(video.Duration.Min), float64(video.Duration.Max), float64(video.Duration.Step))
 		}
 		if len(video.Ratios) > 0 {
 			spec.Options["size"] = anyValues(video.Ratios)

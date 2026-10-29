@@ -30,9 +30,10 @@ export type ChannelTransport = {
  */
 export function createChannelTransport(config: ChannelTransportConfig, scene?: ChannelScene): ChannelTransport {
     const sceneHeaders = (contentType?: string, extra?: Record<string, string>) => ({
-        ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
+        // 插件鉴权头由 browser-plugin 按 manifest 生成，这里不再注入默认 Bearer。
+        ...(config.apiKey && !config.declarativePlugin ? { Authorization: `Bearer ${config.apiKey}` } : {}),
         ...(contentType ? { "Content-Type": contentType } : {}),
-        ...(scene && config.baseUrl && isSystemProxyBaseUrl(config.baseUrl)
+        ...(config.channelScope !== "user" && scene && config.baseUrl && isSystemProxyBaseUrl(config.baseUrl)
             ? { "X-Canvas-Scene": scene, "X-Idempotency-Key": createClientId() }
             : {}),
         ...extra,

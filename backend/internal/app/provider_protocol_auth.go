@@ -1,4 +1,5 @@
-// 声明式协议插件的鉴权：Bearer/Header/Query、AWS SigV4 与腾讯云 TC3 签名。
+// 声明式协议插件的鉴权：Bearer/Header/Basic 等纯头部规则与浏览器共用
+// protocol.HeaderAuth；Query、AWS SigV4、腾讯云 TC3 与火山 V4 签名只在宿主执行。
 
 package app
 
@@ -22,30 +23,21 @@ import (
 )
 
 func applyProtocolAuth(req *http.Request, config providerConfig, auth protocol.ManifestAuth) error {
-	typeName := strings.ToLower(strings.TrimSpace(auth.Type))
-	if typeName == "" {
-		applyProviderAuth(req, config)
+	credentials := protocolAuthCredentials(config)
+	// 不需要宿主机能力的头部规则（含空 type 的 apiFormat 默认头）与浏览器共用同一份实现。
+	headers, handled, err := protocol.HeaderAuth(auth, credentials, config.APIFormat, req.Header.Get)
+	if err != nil {
+		return err
+	}
+	if handled {
+		for _, header := range headers {
+			req.Header.Set(header.Name, header.Value)
+		}
 		return nil
 	}
-	credential := protocolCredentialField(config, auth.Field)
+	typeName := strings.ToLower(strings.TrimSpace(auth.Type))
+	credential := credentials.Credential(auth.Field)
 	switch typeName {
-	case "none":
-		return nil
-	case "bearer":
-		header := defaultString(strings.TrimSpace(auth.Header), "Authorization")
-		prefix := auth.Prefix
-		if prefix == "" {
-			prefix = "Bearer "
-		}
-		req.Header.Set(header, prefix+credential)
-		return nil
-	case "header", "api-key", "apikey":
-		header := strings.TrimSpace(auth.Header)
-		if header == "" {
-			return errors.New("插件 header 鉴权缺少 header 名称")
-		}
-		req.Header.Set(header, auth.Prefix+credential)
-		return nil
 	case "query":
 		name := defaultString(strings.TrimSpace(auth.Query), strings.TrimSpace(auth.Field))
 		if name == "" {
@@ -55,44 +47,27 @@ func applyProtocolAuth(req *http.Request, config providerConfig, auth protocol.M
 		query.Set(name, auth.Prefix+credential)
 		req.URL.RawQuery = query.Encode()
 		return nil
-	case "basic":
-		username := auth.Username
-		if username == "" {
-			username = credential
-		}
-		password := protocolCredentialField(config, auth.SecretField)
-		req.SetBasicAuth(username, password)
-		return nil
-	case "anthropic":
-		req.Header.Set(defaultString(auth.Header, "x-api-key"), credential)
-		if req.Header.Get("anthropic-version") == "" {
-			req.Header.Set("anthropic-version", "2023-06-01")
-		}
-		return nil
-	case "google-api-key", "gemini":
-		req.Header.Set(defaultString(auth.Header, "x-goog-api-key"), credential)
-		return nil
 	case "volcengine-v4":
-		secret := protocolCredentialField(config, auth.SecretField)
+		secret := credentials.Credential(auth.SecretField)
 		if credential == "" || secret == "" {
 			return errors.New("火山引擎 V4 鉴权需要 Access Key 和 Secret Key")
 		}
-		credentials := base.Credentials{
+		volcCredentials := base.Credentials{
 			AccessKeyID: credential, SecretAccessKey: secret,
 			Region:  defaultString(strings.TrimSpace(auth.Region), "cn-north-1"),
 			Service: strings.TrimSpace(auth.Service),
 		}
-		if credentials.Service == "" {
+		if volcCredentials.Service == "" {
 			return errors.New("火山引擎 V4 鉴权缺少 service")
 		}
-		signed := credentials.Sign(req)
+		signed := volcCredentials.Sign(req)
 		*req = *signed
 		return nil
 	case "aws-sigv4":
-		secret := protocolCredentialField(config, auth.SecretField)
+		secret := credentials.Credential(auth.SecretField)
 		return signProtocolAWSV4(req, credential, secret, auth)
 	case "tc3":
-		secret := protocolCredentialField(config, auth.SecretField)
+		secret := credentials.Credential(auth.SecretField)
 		return signProtocolTC3(req, credential, secret, auth)
 	default:
 		return fmt.Errorf("插件声明了尚未启用的鉴权驱动 %s", auth.Type)
@@ -240,13 +215,13 @@ func sha256Hex(value []byte) string {
 	return hex.EncodeToString(hash[:])
 }
 
+// protocolAuthCredentials 把渠道配置投影成单次请求的瞬时凭据；字段别名解析在 protocol 侧统一。
+func protocolAuthCredentials(config providerConfig) protocol.Credentials {
+	return protocol.Credentials{APIKey: config.APIKey, SecretKey: config.SecretKey}
+}
+
 func protocolCredentialField(config providerConfig, field string) string {
-	switch strings.ToLower(strings.TrimSpace(field)) {
-	case "secretkey", "secret_key", "secret":
-		return strings.TrimSpace(config.SecretKey)
-	default:
-		return strings.TrimSpace(config.APIKey)
-	}
+	return protocolAuthCredentials(config).Credential(field)
 }
 
 func protocolRequestURL(baseURL string, spec protocol.RequestSpec) (string, error) {

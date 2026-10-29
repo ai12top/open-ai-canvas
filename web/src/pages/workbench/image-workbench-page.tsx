@@ -13,12 +13,13 @@ import { WorkspacePage } from "@/components/layout/workspace-page";
 import { CanvasResourceMentionTextarea } from "@/components/canvas/canvas-resource-mention-textarea";
 import { normalizeCanvasNodeMentionTokens, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { imageResolutionUsesQuality } from "@/lib/image-size-presets";
-import { modelCapabilityConfigFor, normalizeImageValue, normalizeVideoValue } from "@/lib/model-capabilities";
+import { modelCapabilityConfigFor, normalizeImageValue, normalizeVideoValue, videoDurationSupported } from "@/lib/model-capabilities";
+import { videoDurationRequestFields } from "@/lib/video-duration-fields";
 import { creationVideoConfig } from "@/pages/create/creation-generation-config";
 import { imageQualityLabel } from "@/lib/image-quality";
 import { modelQuoteRequest } from "@/lib/model-pricing";
 import { quoteModel } from "@/services/api/logical-models";
-import { prepareBackendGenerationTask } from "@/services/api/generation-task";
+import { submitBackendGenerationTask } from "@/services/api/generation-task";
 import { createGenerationTask, cancelGenerationTask, queryGenerationTask, retryGenerationTask, type GenerationTask } from "@/services/api/task-center";
 import { capabilitySupportedModes, createWorkbenchTask, listWorkbenchTasks, listWorkbenchTools, normalizeWorkbenchGuide, resolveWorkbenchResourceURL, type WorkbenchKind, type WorkbenchPromptPreset, type WorkbenchTool } from "@/services/api/workbench";
 import { resourceStorageKey, resolveResourceUrl, uploadResourceFile } from "@/services/api/resources";
@@ -29,6 +30,7 @@ import { useUserStore } from "@/stores/use-user-store";
 
 import { workbenchCategoryLabel, workbenchCategories } from "./workbench-catalog";
 import { missingWorkbenchInput, workbenchPromptRequired, workbenchVideoOperation } from "./workbench-input";
+import { ParameterChips, WorkbenchDurationChips } from "./workbench-parameter-chips";
 import "./workbench.css";
 import "./workbench-count-picker.css";
 
@@ -224,6 +226,7 @@ export function WorkbenchPage({ kind }: { kind: WorkbenchKind }) {
     const profile = useMemo(() => modelCapabilityConfigFor(config, selectedModel), [config, selectedModel]);
     const imageProfile = profile.image;
     const videoProfile = profile.video;
+    const durationFields = videoDurationRequestFields(videoProfile, seconds);
     const filteredTools = useMemo(() => filterWorkbenchTools(tools, toolCategory, toolSearch), [toolCategory, toolSearch, tools]);
     const quickTools = useMemo(() => {
         const preferred = tools.filter((item) => item.recommended || item.categoryId === "ecommerce" || item.categoryId === "product");
@@ -302,7 +305,7 @@ export function WorkbenchPage({ kind }: { kind: WorkbenchKind }) {
                 ratio: saved.video?.ratio || videoProfile.defaultRatio,
                 resolution: saved.video?.videoQuality || videoProfile.defaultResolution,
             });
-            setSeconds(normalized.seconds);
+            setSeconds(normalized.seconds || "");
             setRatio(normalized.ratio);
             setVideoQuality(normalized.resolution.replace(/p$/i, ""));
         }
@@ -332,7 +335,7 @@ export function WorkbenchPage({ kind }: { kind: WorkbenchKind }) {
             ratio: saved?.ratio || videoProfile.defaultRatio,
             resolution: saved?.videoQuality || videoProfile.defaultResolution,
         });
-        setSeconds(normalized.seconds);
+        setSeconds(normalized.seconds || "");
         setRatio(normalized.ratio);
         setVideoQuality(normalized.resolution.replace(/p$/i, ""));
     }, [kind, selectedModel, settingsReady, videoProfile]);
@@ -348,9 +351,14 @@ export function WorkbenchPage({ kind }: { kind: WorkbenchKind }) {
                 audioCount: references.filter((reference) => reference.kind === "audio").length,
                 characterCount: 0,
             },
-            ...(kind === "image" ? { imageSize: ratio, options: { size: ratio, quality, ...(imageProfile?.resolution.supported ? { imageResolution } : {}), count: selectedCount } } : { videoSeconds: seconds, options: { size: ratio, videoSeconds: Number(seconds), vquality: videoQuality } }),
+            ...(kind === "image"
+                ? { imageSize: ratio, options: { size: ratio, quality, ...(imageProfile?.resolution.supported ? { imageResolution } : {}), count: selectedCount } }
+                : {
+                      ...(durationFields.requirementSeconds !== undefined ? { videoSeconds: durationFields.requirementSeconds } : {}),
+                      options: { size: ratio, ...(durationFields.optionSeconds !== undefined ? { videoSeconds: durationFields.optionSeconds } : {}), vquality: videoQuality },
+                  }),
         }),
-        [capability, imageProfile, imageResolution, kind, prompt, quality, ratio, references, seconds, selectedCount, videoQuality],
+        [capability, durationFields.optionSeconds, durationFields.requirementSeconds, imageProfile, imageResolution, kind, prompt, quality, ratio, references, selectedCount, videoQuality],
     );
 
     useEffect(() => {
@@ -461,7 +469,7 @@ export function WorkbenchPage({ kind }: { kind: WorkbenchKind }) {
         setRatio(kind === "image" ? imageProfile?.size.default || "1:1" : videoProfile?.defaultRatio || "16:9");
         setQuality(imageProfile?.quality.default || "auto");
         setImageResolution(imageProfile?.resolution.default || "auto");
-        setSeconds(String(videoProfile?.duration.default || 6));
+        setSeconds(videoDurationSupported(videoProfile) ? String(videoProfile?.duration.default || 6) : "");
         setVideoQuality((videoProfile?.defaultResolution || "720p").replace(/p$/i, ""));
         const params = new URLSearchParams(searchParams);
         params.delete("tool");
@@ -645,7 +653,7 @@ export function WorkbenchPage({ kind }: { kind: WorkbenchKind }) {
                           parameters,
                           references: readyReferences.map((reference) => ({ resourceId: reference.resourceId!, kind: reference.kind, role: reference.role, ...(reference.slotKey ? { slotKey: reference.slotKey } : {}) })),
                       })
-                    : await prepareBackendGenerationTask({
+                    : await submitBackendGenerationTask({
                           mode: kind,
                           prompt: submittedPrompt,
                           config: generationConfig,
@@ -695,7 +703,7 @@ export function WorkbenchPage({ kind }: { kind: WorkbenchKind }) {
                               ...(tool && preset ? { workbenchPresetId: preset.id } : {}),
                               workbench: { kind, ...(tool ? { toolId: tool.id } : {}), ...(tool && preset ? { presetId: preset.id } : {}), parameters, references: referenceSnapshot },
                           },
-                      }).then((taskInput) => createGenerationTask({ ...taskInput, ...(videoOperation ? { operation: videoOperation } : {}) }));
+                      });
             const task = await queryGenerationTask(createdTask.id);
             setTasks((current) => [task, ...current.filter((item) => item.id !== task.id)]);
             if (revision === workbenchRevisionRef.current) {
@@ -744,13 +752,15 @@ export function WorkbenchPage({ kind }: { kind: WorkbenchKind }) {
             setCount(restoredCount);
             rememberImageSettings({ ratio: restoredRatio, quality: restoredQuality, imageResolution: restoredResolution, count: restoredCount });
         } else {
-            const restoredSeconds = parameters.seconds != null ? String(parameters.seconds) : seconds;
+            // 没有时长参数的模型不恢复秒数，也不写秒数偏好；切回普通模型时由偏好/默认值重新填充。
+            const restoredSeconds = !videoDurationSupported(videoProfile) ? "" : parameters.seconds != null ? String(parameters.seconds) : seconds;
             const restoredRatio = typeof parameters.ratio === "string" ? parameters.ratio : ratio;
             const restoredQuality = typeof parameters.resolution === "string" ? parameters.resolution.replace(/p$/i, "") : videoQuality;
             setSeconds(restoredSeconds);
             setRatio(restoredRatio);
             setVideoQuality(restoredQuality);
-            rememberVideoSettings({ seconds: restoredSeconds, ratio: restoredRatio, videoQuality: restoredQuality });
+            const restoredDurationSupported = videoDurationSupported(videoProfile);
+            rememberVideoSettings({ ...(restoredDurationSupported ? { seconds: restoredSeconds } : {}), ratio: restoredRatio, videoQuality: restoredQuality });
             if (typeof parameters.generateAudio === "boolean") updateConfig("videoGenerateAudio", String(parameters.generateAudio));
             if (typeof parameters.watermark === "boolean") updateConfig("videoWatermark", String(parameters.watermark));
         }
@@ -877,17 +887,11 @@ export function WorkbenchPage({ kind }: { kind: WorkbenchKind }) {
             </div>
         ) : videoProfile ? (
             <div className="workbench-settings-content">
-                <ParameterChips
-                    label="视频时长"
+                <WorkbenchDurationChips
+                    profile={videoProfile}
                     value={seconds}
-                    options={(videoProfile.duration.selection === "enum"
-                        ? videoProfile.duration.values || []
-                        : Array.from(
-                              { length: Math.floor(((videoProfile.duration.max || 15) - (videoProfile.duration.min || 1)) / (videoProfile.duration.step || 1)) + 1 },
-                              (_, index) => (videoProfile.duration.min || 1) + index * (videoProfile.duration.step || 1),
-                          )
-                    ).map((value) => ({ value: String(value), label: `${value} 秒` }))}
                     onChange={(value) => {
+                        if (!videoDurationSupported(videoProfile)) return;
                         setSeconds(value);
                         rememberVideoSettings({ seconds: value });
                     }}
@@ -1647,29 +1651,6 @@ function CountPicker({ value, max, onChange }: { value: string; max: number; onC
                         </div>
                     </div>
                 ) : null}
-            </div>
-        </div>
-    );
-}
-
-function ParameterChips({ label, value, options, onChange }: { label: string; value: string; options: Array<{ value: string; label: string }>; onChange: (value: string) => void }) {
-    if (options.length > 7) {
-        return (
-            <label className="workbench-setting-row">
-                <span>{label}</span>
-                <Select aria-label={label} value={value} onChange={onChange} options={options} />
-            </label>
-        );
-    }
-    return (
-        <div className="workbench-chip-field">
-            <span>{label}</span>
-            <div role="radiogroup" aria-label={label}>
-                {options.map((option) => (
-                    <button key={option.value} type="button" role="radio" aria-checked={value === option.value} className={value === option.value ? "is-active" : ""} onClick={() => onChange(option.value)}>
-                        {option.label}
-                    </button>
-                ))}
             </div>
         </div>
     );

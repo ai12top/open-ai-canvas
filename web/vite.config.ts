@@ -1,5 +1,6 @@
 import { dirname, resolve } from "node:path";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
@@ -12,7 +13,17 @@ const appChangelog = readFileSync(resolve(webDir, "../CHANGELOG.md"), "utf8");
 const apiProxyTarget = process.env.VITE_API_PROXY_TARGET?.trim() || "http://127.0.0.1:8080";
 
 export default defineConfig({
-    plugins: [react()],
+    plugins: [{
+        name: "shared-browser-protocol",
+        buildStart() {
+            if (process.env.CANVAS_BROWSER_PROTOCOL_PREBUILT !== "1") {
+                execFileSync("sh", [resolve(webDir, "../scripts/build-browser-protocol.sh")], { stdio: "inherit" });
+            }
+            for (const file of ["protocol.wasm", "wasm_exec.js"]) {
+                if (!existsSync(resolve(webDir, "public/browser-protocol", file))) throw new Error(`Missing browser protocol asset: ${file}`);
+            }
+        },
+    }, react()],
     define: {
         __APP_VERSION__: JSON.stringify(appVersion),
         __APP_CHANGELOG__: JSON.stringify(appChangelog),

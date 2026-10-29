@@ -30,6 +30,22 @@ describe("统一图片分辨率与宽高比", () => {
         expect(reopened.image?.size.presets?.filter((p) => p.tier === "1.5k")).toHaveLength(8);
         expect(resolveImageRequestSize(profile, "auto", "1536x1536")?.value).toBe("1536x1536");
     });
+    test("QCreate 大写质量档位在三档和四档声明中映射分辨率且保留原值", () => {
+        for (const [qualityValues, includes4k] of [
+            [["1K", "1.5K", "2K"], false],
+            [["1K", "1.5K", "2K", "4K"], true],
+        ] as const) {
+            const profile = defaultImageCapabilityConfig();
+            profile.size = { parameter: "aspect_ratio", values: ["1:1", "16:9"], default: "16:9", allowCustom: false };
+            profile.quality = { supported: true, values: [...qualityValues], default: "2K" };
+            const picker = renderToStaticMarkup(<ImageSizePicker profile={profile} size="16:9" quality="2K" onChange={() => {}} />);
+            expect(picker).toMatch(/<button[^>]*>1\.5K/);
+            expect(picker.includes(">4K")).toBe(includes4k);
+            expect(imageQualityForTier(profile, "1.5k")).toBe("1.5K");
+            if (includes4k) expect(imageQualityForTier(profile, "4k")).toBe("4K");
+        }
+    });
+
     test("管理员档位开关按已有比例启用，部分比例不显示为关闭", () => {
         for (const model of ["midjourney-1k", "midjourney-2k"]) {
             const profile = defaultImageCapabilityConfig("cangyuan-midjourney-v82", model);
