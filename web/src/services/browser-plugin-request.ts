@@ -1,6 +1,6 @@
 import { readFileAsDataUrl } from "@/lib/image-utils";
 import { imageParameterRequest } from "@/lib/image-parameters";
-import { modelCapabilityConfigFor, videoResolutionRequest } from "@/lib/model-capabilities";
+import { modelCapabilityConfigFor, videoDurationSupported, videoResolutionRequest } from "@/lib/model-capabilities";
 import { isResourceUrl, resourceIdFromStorageKey } from "@/services/api/resources";
 import { callBrowserProtocol } from "@/services/api/browser-protocol";
 import { getMediaBlob } from "@/services/file-storage";
@@ -64,27 +64,56 @@ export async function browserPluginRequest(options: BackendGenerationTaskOptions
     const resolution = mode === "image" ? declared(parameters?.imageResolution, config.imageResolution) : profile.video ? videoResolutionRequest(profile.video, config.vquality) || config.vquality : config.vquality;
     const configuredCount = Number(parameters ? parameters.count ?? 1 : config.count);
     const count = Number.isFinite(configuredCount) && configuredCount >= 1 ? Math.floor(configuredCount) : 1;
+    const durationSupported = mode === "video" ? videoDurationSupported(profile.video) : undefined;
+    const duration = mode === "video" && durationSupported ? Number(config.videoSeconds) || 0 : undefined;
     const output = {
-        count, duration: Number(config.videoSeconds) || 0,
-        aspectRatio: declared(parameterSize, config.size), resolution, quality: declared(parameters?.quality, config.quality),
-        generateAudio: config.videoGenerateAudio === "true", watermark: config.videoWatermark === "true",
+        count,
+        ...(duration !== undefined ? { duration } : {}),
+        aspectRatio: declared(parameterSize, config.size),
+        resolution,
+        quality: declared(parameters?.quality, config.quality),
+        generateAudio: config.videoGenerateAudio === "true",
+        watermark: config.videoWatermark === "true",
     };
     const channel = resolveModelChannel(config, config.model);
     const protocol = channel.modelCosts?.find((item) => item.model === modelOptionName(config.model))?.protocol || channel.interfaceType || "";
     const defaults = channel.modelCosts?.find((item) => item.model === modelOptionName(config.model))?.defaultOptions;
     const providerOptions = parameters ? undefined : { ...(metadata.providerOptions as Record<string, Record<string, unknown>> | undefined) };
     if (providerOptions && defaults) providerOptions[protocol] = { ...defaults, ...providerOptions[protocol] };
+    // 渠道默认参数里可能带着时长键；模型不支持时长参数时只剥掉这些键，其余（图片等）参数原样保留。
+    if (providerOptions && durationSupported === false) providerOptions[protocol] = withoutVideoDurationKeys(providerOptions[protocol]);
+    const extra: Record<string, unknown> = { count: String(count) };
+    if (mode !== "video" || durationSupported) {
+        extra.videoSeconds = config.videoSeconds;
+    }
     const request: BrowserPluginRequest = {
-        capability: mode, model: modelOptionName(config.model), prompt: options.prompt, instructions: config.systemPrompt,
-        images, videos, audios, inputs: [...images, ...videos, ...audios],
-        ...output, imageCount: output.count, output,
+        capability: mode,
+        model: modelOptionName(config.model),
+        prompt: options.prompt,
+        instructions: config.systemPrompt,
+        images,
+        videos,
+        audios,
+        inputs: [...images, ...videos, ...audios],
+        ...output,
+        ...(duration !== undefined ? { duration } : {}),
+        imageCount: output.count,
+        output,
         operation: String(metadata.videoEditOperation || metadata.videoOperation || ""),
         ...(parameters ? { imageParameters } : { providerOptions }),
-        extra: { videoSeconds: config.videoSeconds, count: String(count) },
+        extra,
     };
     // 图片尺寸在 Go 侧规范化（与执行路径同一份规则），落盘/提交的都是已归一化的 request。
     const imageSize = mode === "image" ? imageSizeDeclaration(profile.image, protocol) : undefined;
     return imageSize ? normalizeImageRequest(request, imageSize) : request;
+}
+
+const VIDEO_DURATION_KEYS = ["videoSeconds", "duration", "seconds", "durationSeconds"] as const;
+
+function withoutVideoDurationKeys(options: Record<string, unknown> | undefined): Record<string, unknown> {
+    const next: Record<string, unknown> = { ...(options || {}) };
+    for (const key of VIDEO_DURATION_KEYS) delete next[key];
+    return next;
 }
 
 /** 桥上的 normalizeImage 是本地 WASM 调用（零 HTTP），不加载插件清单、不碰凭据。 */

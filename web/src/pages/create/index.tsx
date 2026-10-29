@@ -249,7 +249,7 @@ export default function CreatePage() {
             ratio: saved?.ratio || videoProfile.defaultRatio,
             resolution: saved?.videoQuality || videoProfile.defaultResolution,
         });
-        setSeconds(normalized.seconds);
+        setSeconds(normalized.seconds || "");
         setRatio(normalized.ratio);
         setVideoQuality(normalized.resolution.replace(/p$/i, ""));
     }, [composerPreferencesHydrated, composerPreferencesInitialized, mode, selectedModel, videoProfile]);

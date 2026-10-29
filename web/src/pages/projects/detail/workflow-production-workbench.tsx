@@ -14,7 +14,7 @@ import { CanvasResourceMentionTextarea } from "@/components/canvas/canvas-resour
 import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { ModelPicker } from "@/components/model-picker";
 import { CreditSymbol, requestCreditCost } from "@/constant/credits";
-import { modelCapabilityConfigFor, normalizeImageValue, normalizeVideoValue, videoDurationOptions } from "@/lib/model-capabilities";
+import { modelCapabilityConfigFor, normalizeImageValue, normalizeVideoValue, videoDurationOptions, videoDurationSupported } from "@/lib/model-capabilities";
 import { imageQualityLabel } from "@/lib/image-quality";
 import { modelQuoteDescription, modelQuoteRequest } from "@/lib/model-pricing";
 import { customShotTitle, formatShotOrdinal, normalizeDefaultShotTitle } from "@/lib/shot-label";
@@ -37,7 +37,6 @@ import {
     type ProjectShot,
     type ShotAssetReference,
     type ShotArtifact,
-    type ShotRevisionInput,
     type WorkflowStep,
 } from "@/services/api/projects";
 import { resourceFileUrl, resourceIdFromStorageKey, resourceStorageKey } from "@/services/api/resources";
@@ -57,11 +56,7 @@ import {
 } from "./workflow-shared";
 import { buildShotAssetReferenceContext, ensureShotAssetMentionPrompt, resolveShotAssetMentionPrompt } from "./workflow-shot-references";
 import { Select } from "@/components/ui/base/select";
-
-type ShotEditorValues = Omit<ShotRevisionInput, "durationMs"> & {
-    title: string;
-    durationSeconds: number;
-};
+import { shotDurationFields, shotDurationSourceMs, shotEditorDurationSeconds, shotGenerationSeconds, shotSavePayload, type ShotEditorValues } from "./workflow-shot-payload";
 
 type Props = {
     activeStage: ShortDramaWorkflowStage;
@@ -101,6 +96,9 @@ export default function WorkflowProductionWorkbench(props: Props) {
     const [taskClock, setTaskClock] = useState(() => Date.now());
     const activeShotIdRef = useRef(selectedShot?.id || "");
     activeShotIdRef.current = selectedShot?.id || "";
+    // 初始化类副作用只跟随配置重跑，镜头时长通过 ref 读取，避免切镜头时把规格重置回全局默认。
+    const selectedShotRef = useRef(selectedShot);
+    selectedShotRef.current = selectedShot;
     const shots = useMemo(() => (detail.shots || []).filter((item) => item.unitId === unitId).slice().sort((left, right) => left.position - right.position), [detail.shots, unitId]);
     const shotIndex = selectedShot ? shots.findIndex((item) => item.id === selectedShot.id) : -1;
     const revision = currentRevision(detail, selectedShot);
@@ -138,20 +136,25 @@ export default function WorkflowProductionWorkbench(props: Props) {
             ...(reference.asset?.primaryVersionId ? [[reference.asset.primaryVersionId, reference] as const] : []),
         ]));
     }, [detail.shotReferences, selectedShot?.id]);
-    const currentDurationSeconds = Number(watchedDuration || Math.max(0.5, (selectedShot?.durationMs || 3000) / 1000));
+    const watchedDurationSeconds = typeof watchedDuration === "number" && Number.isFinite(watchedDuration) ? watchedDuration : undefined;
+    const shotDurationFallbackSeconds = Math.max(0.5, shotDurationSourceMs(undefined, selectedShot?.durationMs) / 1000);
+    const currentDurationSeconds = watchedDurationSeconds ?? shotDurationFallbackSeconds;
     const generationSeconds = String(Math.max(1, Math.round(currentDurationSeconds)));
+    // 时长旋钮只属于支持时长参数的模型；不支持的模型连报价/提交里的时长键都不应该出现，否则报价会又把时长合回去。
+    const selectedModelProfile = useMemo(() => modelCapabilityConfigFor(effectiveConfig, selectedModel), [effectiveConfig, selectedModel]);
+    const durationFields = shotDurationFields(generationCapability === "video" && videoDurationSupported(selectedModelProfile.video), generationSeconds);
     const generationReferenceAudios = generationCapability === "video" ? shotAssetReferenceContext.referenceAudios : [];
     const videoEditOperation = generationCapability === "video" && shotAssetReferenceContext.referenceImages.length ? "reference_to_video" : undefined;
     const modelRequirements = useMemo<ModelRequirements>(() => ({
         capability: generationCapability,
         input: { textCount: 1, imageCount: shotAssetReferenceContext.referenceImages.length, videoCount: 0, audioCount: generationReferenceAudios.length, characterCount: 0 },
         videoOperation: videoEditOperation,
-        videoSeconds: generationCapability === "video" ? generationSeconds : undefined,
+        videoSeconds: generationCapability === "video" ? durationFields.videoSeconds : undefined,
         imageSize: generationCapability === "image" ? aspectRatio : undefined,
         options: generationCapability === "video"
-            ? { size: aspectRatio, vquality: resolution, videoSeconds: Number(generationSeconds) }
+            ? { size: aspectRatio, vquality: resolution, ...(durationFields.optionSeconds !== undefined ? { videoSeconds: durationFields.optionSeconds } : {}) }
             : { size: aspectRatio, quality: imageQuality },
-    }), [aspectRatio, generationCapability, generationReferenceAudios.length, generationSeconds, imageQuality, resolution, shotAssetReferenceContext.referenceImages.length, videoEditOperation]);
+    }), [aspectRatio, durationFields.optionSeconds, durationFields.videoSeconds, generationCapability, generationReferenceAudios.length, imageQuality, resolution, shotAssetReferenceContext.referenceImages.length, videoEditOperation]);
     const routedModel = resolveCompatibleModel(effectiveConfig, selectedModel, modelRequirements) || selectedModel;
     const activeProfile = useMemo(() => modelCapabilityConfigFor(effectiveConfig, routedModel), [effectiveConfig, routedModel]);
     const videoProfile = generationCapability === "video" ? activeProfile.video : undefined;
@@ -162,17 +165,22 @@ export default function WorkflowProductionWorkbench(props: Props) {
               videoWatermark: effectiveConfig.videoWatermark,
           })
         : undefined, [effectiveConfig, generationCapability, routedModel]);
-    const generationConfig = useMemo(() => ({
-        ...effectiveConfig,
-        model: routedModel,
-        imageModel: generationCapability === "image" ? routedModel : effectiveConfig.imageModel,
-        videoModel: generationCapability === "video" ? routedModel : effectiveConfig.videoModel,
-        size: aspectRatio,
-        quality: imageQuality,
-        vquality: resolution,
-        videoSeconds: generationSeconds,
-        ...(videoBooleanOptions || {}),
-    }), [aspectRatio, effectiveConfig, generationCapability, generationSeconds, imageQuality, resolution, routedModel, videoBooleanOptions]);
+    const generationConfig = useMemo(() => {
+        const next = {
+            ...effectiveConfig,
+            model: routedModel,
+            imageModel: generationCapability === "image" ? routedModel : effectiveConfig.imageModel,
+            videoModel: generationCapability === "video" ? routedModel : effectiveConfig.videoModel,
+            size: aspectRatio,
+            quality: imageQuality,
+            vquality: resolution,
+            ...(videoBooleanOptions || {}),
+        } as typeof effectiveConfig;
+        if (durationFields.videoSeconds !== undefined) next.videoSeconds = durationFields.videoSeconds;
+        else if (generationCapability === "video") delete (next as Partial<typeof effectiveConfig>).videoSeconds;
+        else next.videoSeconds = generationSeconds;
+        return next;
+    }, [aspectRatio, durationFields.videoSeconds, effectiveConfig, generationCapability, generationSeconds, imageQuality, resolution, routedModel, videoBooleanOptions]);
     const priceChannel = resolveModelChannel(generationConfig, routedModel);
     const configuredCredits = requestCreditCost({
         channelMode: priceChannel.scope === "system" ? "remote" : "local",
@@ -190,7 +198,7 @@ export default function WorkflowProductionWorkbench(props: Props) {
     const generationCredits = routeQuote ? routeQuote.amountMicrocredits / 1_000_000 : configuredCredits;
     const formattedGenerationCredits = generationCredits?.toLocaleString("zh-CN", { maximumFractionDigits: 6 });
     const modelSummary = routedModel ? modelDisplayName(effectiveConfig, routedModel) : "未选择模型";
-    const durationSummary = `${Number(watchedDuration || Math.max(0.5, (selectedShot?.durationMs || 3000) / 1000))}s`;
+    const durationSummary = `${currentDurationSeconds}s`;
     const resolutionSummary = generationCapability === "video" ? formatVideoResolutionLabel(resolution) : imageQuality.toUpperCase();
 
     useEffect(() => {
@@ -206,7 +214,7 @@ export default function WorkflowProductionWorkbench(props: Props) {
             });
             setAspectRatio(normalized.ratio);
             setResolution(normalized.resolution);
-            form.setFieldValue("durationSeconds", Number(normalized.seconds));
+            form.setFieldValue("durationSeconds", shotEditorDurationSeconds(profile.video, shotDurationSourceMs(undefined, selectedShotRef.current?.durationMs), effectiveConfig.videoSeconds));
         } else if (generationCapability === "image" && profile.image) {
             const normalized = normalizeImageValue(profile.image, { size: detail.project.aspectRatio || effectiveConfig.size, quality: effectiveConfig.quality, count: "1" });
             setAspectRatio(normalized.size);
@@ -232,11 +240,12 @@ export default function WorkflowProductionWorkbench(props: Props) {
     }, [creditsEnabled, quoteRequestKey]);
 
     useEffect(() => {
-        const shotDurationSeconds = Math.max(0.5, (revision?.durationMs || selectedShot?.durationMs || 3000) / 1000);
+        const shotDuration = shotDurationSourceMs(revision?.durationMs, selectedShot?.durationMs);
         const currentModel = selectedModelRef.current || initialModel;
+        // 镜头剪辑时长是镜头自己的字段：模型不支持时长旋钮时原样保留，不能因为控件被隐藏就丢成 NaN。
         const normalizedDurationSeconds = generationCapability === "video" && currentModel
-            ? Number(normalizeVideoValue(modelCapabilityConfigFor(effectiveConfig, currentModel).video!, { seconds: String(shotDurationSeconds) }).seconds)
-            : shotDurationSeconds;
+            ? shotEditorDurationSeconds(modelCapabilityConfigFor(effectiveConfig, currentModel).video, shotDuration)
+            : Math.max(0.5, shotDuration / 1000);
         const videoPrompt = ensureShotAssetMentionPrompt(revision?.videoPrompt || "", shotAssetReferenceContext.mentionReferences);
         form.setFieldsValue({
             title: normalizeDefaultShotTitle(selectedShot?.title, Math.max(0, shotIndex)),
@@ -262,14 +271,17 @@ export default function WorkflowProductionWorkbench(props: Props) {
         setSelectedModel(nextModel);
         const profile = modelCapabilityConfigFor(effectiveConfig, nextModel);
         if (generationCapability === "video" && profile.video) {
+            const watched = form.getFieldValue("durationSeconds");
+            const requestedDurationSeconds = typeof watched === "number" && Number.isFinite(watched) ? String(watched) : generationSeconds;
             const normalized = normalizeVideoValue(profile.video, {
-                seconds: String(form.getFieldValue("durationSeconds") || generationSeconds),
+                seconds: requestedDurationSeconds,
                 ratio: aspectRatio,
                 resolution,
             });
             setAspectRatio(normalized.ratio);
             setResolution(normalized.resolution);
-            form.setFieldValue("durationSeconds", Number(normalized.seconds));
+            // 切到不支持时长的模型时恢复镜头自己的剪辑时长，切回支持时长的模型再按模型约束归一化。
+            form.setFieldValue("durationSeconds", shotEditorDurationSeconds(profile.video, shotDurationSourceMs(undefined, selectedShotRef.current?.durationMs), requestedDurationSeconds));
             return;
         }
         if (generationCapability === "image" && profile.image) {
@@ -282,16 +294,7 @@ export default function WorkflowProductionWorkbench(props: Props) {
     const saveShot = useMutation({
         mutationFn: async (values: ShotEditorValues) => {
             if (!selectedShot) throw new Error("请先选择镜头");
-            return saveProjectShot(projectId, {
-                id: selectedShot.id,
-                unitId,
-                title: values.title,
-                description: values.plotDescription,
-                position: selectedShot.position,
-                durationMs: Math.round(values.durationSeconds * 1000),
-                status: selectedShot.status,
-                revision: revisionInput(values),
-            });
+            return saveProjectShot(projectId, shotSavePayload(values, selectedShot));
         },
         onSuccess: async () => { setEditorDirty(false); await onRefresh(); message.success("镜头脚本已保存为新版本"); },
         onError: (error) => message.error(error instanceof Error ? error.message : "镜头保存失败"),
@@ -335,18 +338,10 @@ export default function WorkflowProductionWorkbench(props: Props) {
             if (!routedModel) throw new Error(activeStage === "video" ? "请先配置视频模型" : "请先配置图片模型");
             const compatibilityError = modelCompatibilityError(effectiveConfig, routedModel, modelRequirements);
             if (compatibilityError) throw new Error(`当前模型配置不可用：${compatibilityError}`);
-            const saved = await saveProjectShot(projectId, {
-                id: submittingShot.id,
-                unitId,
-                title: values.title,
-                description: values.plotDescription,
-                position: submittingShot.position,
-                durationMs: Math.round(values.durationSeconds * 1000),
-                status: submittingShot.status,
-                revision: revisionInput(values),
-            });
+            const payload = shotSavePayload(values, submittingShot);
+            const saved = await saveProjectShot(projectId, payload);
             const mode = generationCapability;
-            const config = { ...generationConfig, videoSeconds: String(Math.max(1, Math.round(values.durationSeconds))) };
+            const config = durationFields.videoSeconds !== undefined ? { ...generationConfig, videoSeconds: shotGenerationSeconds(payload.durationMs) } : generationConfig;
             if (!isAiConfigReady(config, routedModel)) throw new Error("当前模型渠道配置不完整，请先到设置中补齐");
             const basePrompt = mode === "video"
                 ? [values.videoPrompt || values.plotDescription, values.action, values.dialogue && `台词：${values.dialogue}`, values.continuityNotes].filter(Boolean).join("\n")
@@ -377,7 +372,7 @@ export default function WorkflowProductionWorkbench(props: Props) {
                     source: "short-drama-workflow",
                     ...(mode === "video" && shotAssetReferenceContext.referenceImages.length ? { videoEditOperation: "reference_to_video" } : {}),
                     resolvedCharacterVersions: shotAssetReferenceContext.resolvedCharacterVersions,
-                    artifactMetadata: { model: routedModel, aspectRatio, resolution, durationSeconds: values.durationSeconds, ...skillExecution.metadata },
+                    artifactMetadata: { model: routedModel, aspectRatio, resolution, durationSeconds: payload.durationMs / 1000, ...skillExecution.metadata },
                 },
             });
             if (activeShotIdRef.current === submittingShot.id) setEditorDirty(false);
@@ -510,11 +505,13 @@ export default function WorkflowProductionWorkbench(props: Props) {
                                     </Form.Item>
                                     <Form.Item label="技能库"><SkillRuntimePicker profile="shortDrama" skills={availableSkills} loading={skillsLoading} value={selectedSkillIds} onChange={setSelectedSkillIds} /></Form.Item>
                                     <div className="workflow-form-grid is-three">
-                                        <Form.Item name="durationSeconds" label="镜头时长（秒）">
-                                            {generationCapability === "video" && videoProfile?.duration.selection === "enum"
-                                                ? <Select options={videoDurationOptions(videoProfile).map((value) => ({ value, label: `${value} 秒` }))} />
-                                                : <InputNumber className="w-full" min={generationCapability === "video" ? videoProfile?.duration.min || 1 : 0.5} max={generationCapability === "video" ? videoProfile?.duration.max || 60 : 60} step={generationCapability === "video" ? videoProfile?.duration.step || 1 : 0.5} />}
-                                        </Form.Item>
+                                        {generationCapability === "video" && !videoDurationSupported(videoProfile) ? null : (
+                                            <Form.Item name="durationSeconds" label="镜头时长（秒）">
+                                                {generationCapability === "video" && videoProfile?.duration.selection === "enum"
+                                                    ? <Select options={videoDurationOptions(videoProfile).map((value) => ({ value, label: `${value} 秒` }))} />
+                                                    : <InputNumber className="w-full" min={generationCapability === "video" ? videoProfile?.duration.min || 1 : 0.5} max={generationCapability === "video" ? videoProfile?.duration.max || 60 : 60} step={generationCapability === "video" ? videoProfile?.duration.step || 1 : 0.5} />}
+                                            </Form.Item>
+                                        )}
                                         {generationCapability === "video" ? <Form.Item label="画幅"><Select value={aspectRatio} onChange={setAspectRatio} options={(videoProfile?.ratios || []).map((value) => ({value, label:value}))} /></Form.Item> : null}
                                         {generationCapability === "video" ? (
                                             <Form.Item label="分辨率"><Select value={resolution} onChange={setResolution} options={(videoProfile?.resolutions || []).map((value) => ({ value, label: formatVideoResolutionLabel(value) }))} /></Form.Item>
@@ -741,22 +738,6 @@ function TimelineShot({ artifactType, detail, shot, task, submitting, index, sel
     const stageLabel = artifactType === "video" ? "镜头视频" : artifactType === "action_board" ? "动作预演" : "分镜画面";
     const cameraMeta = [revision?.shotSize, revision?.cameraMovement].filter(Boolean).join(" · ") || "等待补充镜头参数";
     return <button type="button" className={`workflow-timeline-shot ${selected ? "is-active" : ""}`} onClick={onSelect}><span className="workflow-timeline-media">{preview?.resourceId && preview.type !== "video" ? <img src={resourceFileUrl(preview.resourceId)} alt="" loading="lazy" /> : <Film />}</span><span className="workflow-timeline-copy"><span className="workflow-timeline-heading"><strong>{formatShotOrdinal(index)}</strong><b>{formatDuration(shot.durationMs)}</b></span>{customShotTitle(shot.title, index) ? <em className="workflow-timeline-title">{customShotTitle(shot.title, index)}</em> : null}<small className="workflow-timeline-meta">{cameraMeta}</small><span className="workflow-timeline-status"><span>{stageLabel}{stateArtifact ? ` · v${stateArtifact.version}` : ""}</span><ArtifactStatus artifact={stateArtifact} taskStatus={submitting ? "queued" : task?.status} compact /></span></span></button>;
-}
-
-function revisionInput(values: ShotEditorValues): ShotRevisionInput {
-    return {
-        plotDescription: values.plotDescription,
-        action: values.action,
-        dialogue: values.dialogue,
-        shotSize: values.shotSize,
-        cameraAngle: values.cameraAngle,
-        cameraMovement: values.cameraMovement,
-        durationMs: Math.round(values.durationSeconds * 1000),
-        imagePrompt: values.imagePrompt,
-        videoPrompt: values.videoPrompt,
-        negativePrompt: values.negativePrompt,
-        continuityNotes: values.continuityNotes,
-    };
 }
 
 async function downloadArtifact(artifact: ShotArtifact, shotTitle: string, onError: (content: string) => void) {

@@ -25,7 +25,10 @@ globalThis.fetch = ((input: string | URL | Request, options?: RequestInit) => {
 const sent: Array<Record<string, unknown>> = [];
 axios.request = (async (config: Record<string, unknown>) => {
     sent.push(config);
-    return { data: { data: [{ b64_json: "aGVsbG8=" }] } };
+    const url = String(config.url || "");
+    return url.includes("/v1/yingce/libtv/tasks")
+        ? { data: { taskId: "offline-video", status: "pending" } }
+        : { data: { data: [{ b64_json: "aGVsbG8=" }] } };
 }) as typeof axios.request;
 
 const parameters: ImageParameter[] = [
@@ -72,6 +75,59 @@ const disabledRequest = await browserPluginRequest({ config: { ...config, channe
 assert.equal(disabledRequest.aspectRatio, "2560x1440");
 assert.equal(disabledRequest.resolution, undefined);
 
+// 视频段需要自有 LibTV manifest；未提供时显式跳过，其余检查照常执行。
+async function assertLibTvVideoContract(videoManifestPath: string) {
+    const videoManifest = JSON.parse(await readFile(videoManifestPath, "utf8")) as BrowserPluginManifest;
+    const noDurationConfig = defaultModelCapabilityConfig("libtv-video", "kling-v3-motion-control");
+    noDurationConfig.video!.durationSupported = false;
+    noDurationConfig.video!.duration = { selection: "range", min: 1, max: 1, step: 1, default: 1 };
+    noDurationConfig.video!.ratios = [];
+    noDurationConfig.video!.defaultRatio = "";
+    const normalVideoConfig = defaultModelCapabilityConfig("libtv-video", "star-video2.5");
+    const videoChannel = createModelChannel({
+        id: "offline-video", scope: "user", apiFormat: "openai", interfaceType: "libtv-video",
+        baseUrl: "https://fixture.invalid/v1", apiKey: "synthetic-video-key",
+        models: ["kling-v3-motion-control", "star-video2.5"],
+        modelCosts: [
+            { model: "kling-v3-motion-control", capability: "video", protocol: "libtv-video", capabilityConfig: noDurationConfig, billingMode: "fixed_request", unitPriceMicrocredits: 0 },
+            { model: "star-video2.5", capability: "video", protocol: "libtv-video", capabilityConfig: normalVideoConfig, billingMode: "fixed_request", unitPriceMicrocredits: 0 },
+        ],
+    });
+    const videoTransport: ChannelTransportConfig = { ...videoChannel, channelScope: "user" };
+    const noDurationRequest = await browserPluginRequest({
+        config: { ...defaultConfig, channels: [videoChannel], model: encodeChannelModel(videoChannel.id, "kling-v3-motion-control"), videoSeconds: "8", size: "", vquality: "720p" },
+        mode: "video", prompt: "offline motion fixture",
+    });
+    assert.equal("durationSupported" in noDurationRequest, false);
+    assert.equal(noDurationRequest.duration, undefined);
+    assert.equal(noDurationRequest.output?.duration, undefined);
+    assert.equal(noDurationRequest.extra?.videoSeconds, undefined);
+    await createBrowserPluginTask(videoTransport, videoManifest, noDurationRequest);
+    const noDurationBody = sent.at(-1)!.data as Record<string, unknown>;
+    assert.equal("duration" in noDurationBody, false);
+    const normalVideoRequest = await browserPluginRequest({
+        config: { ...defaultConfig, channels: [videoChannel], model: encodeChannelModel(videoChannel.id, "star-video2.5"), videoSeconds: "8", size: "16:9", vquality: "720p" },
+        mode: "video", prompt: "offline normal fixture",
+    });
+    assert.equal("durationSupported" in normalVideoRequest, false);
+    assert.equal(normalVideoRequest.duration, 8);
+    assert.equal(normalVideoRequest.output?.duration, 8);
+    assert.equal(normalVideoRequest.extra?.videoSeconds, "8");
+    await createBrowserPluginTask(videoTransport, videoManifest, normalVideoRequest);
+    const normalVideoBody = sent.at(-1)!.data as Record<string, unknown>;
+    assert.equal(normalVideoBody.duration, 8);
+}
+
+const videoManifestPath = process.env.YINGCE_LIBTV_MANIFEST;
+let videoContractCases = 0;
+if (videoManifestPath) {
+    await assertLibTvVideoContract(videoManifestPath);
+    videoContractCases = 2;
+    console.log(`PASS: real TS -> Go/WASM video manifest mapping (${videoContractCases} cases: motion-control omits duration, star-video2.5 keeps 8s) using ${videoManifestPath}`);
+} else {
+    console.log("SKIP: LibTV video contract not run because YINGCE_LIBTV_MANIFEST is unset; image/auth/form/CDN checks below still execute");
+}
+
 for (const [auth, expected] of [
     [{ type: "none" }, {}],
     [{ type: "bearer", header: "X-Token", prefix: "Token " }, { "x-token": "Token synthetic-fixture-key" }],
@@ -108,4 +164,4 @@ assert.deepEqual(multipart.getAll("tags"), ["one", "two"]);
 assert.equal((multipart.get("image") as File).type, "image/jpeg");
 assert.equal((multipart.get("image") as File).name, "fixture.jpg");
 
-console.log("PASS: real TS → Go/WASM → transport; pixel size/count, none/custom/basic/Anthropic auth, repeated form fields, upload MIME, CDN credential isolation; no HTTP");
+console.log(`PASS: real TS → Go/WASM → transport; pixel size/count, none/custom/basic/Anthropic auth, repeated form fields, upload MIME, CDN credential isolation; no HTTP (LibTV video contract: ${videoContractCases === 2 ? "2 cases executed" : "SKIPPED, YINGCE_LIBTV_MANIFEST unset"})`);

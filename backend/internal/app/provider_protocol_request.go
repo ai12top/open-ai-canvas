@@ -76,7 +76,10 @@ func protocolRequestFromInput(input canvasGenerationInput) protocol.GenerationRe
 		request.Extra["max_output_tokens"] = input.MaxOutputTokens
 		request.Extra["max_tokens"] = input.MaxOutputTokens
 	}
-	if duration, err := strconv.Atoi(strings.TrimSpace(input.Config.VideoSeconds)); err == nil && duration > 0 {
+	if input.Mode == "video" && !videoDurationSupported(input.VideoCapability) {
+		delete(request.Extra, "videoSeconds")
+	}
+	if duration, err := strconv.Atoi(strings.TrimSpace(input.Config.VideoSeconds)); err == nil && duration > 0 && videoDurationSupported(input.VideoCapability) {
 		request.Duration = duration
 	}
 	if count, err := strconv.Atoi(strings.TrimSpace(input.Config.Count)); err == nil && count > 0 {

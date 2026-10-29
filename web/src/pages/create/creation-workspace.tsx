@@ -21,7 +21,7 @@ import { CreditSymbol, requestCreditCost } from "@/constant/credits";
 import { ASSET_CATEGORY_LABELS } from "@/lib/asset-category";
 import { formatShotOrdinal } from "@/lib/shot-label";
 import { buildImageResolutionOptions, formatImageResolutionSize, supportsImageResolutionPresets } from "@/lib/image-resolution-tiers";
-import { normalizeVideoValue, videoDurationOptions, type ImageCapabilityConfig, type VideoCapabilityConfig } from "@/lib/model-capabilities";
+import { normalizeVideoValue, videoDurationOptions, videoDurationSupported, type ImageCapabilityConfig, type VideoCapabilityConfig } from "@/lib/model-capabilities";
 import { mergedImageCapabilityConfig, type ModelRequirements } from "@/lib/model-selection";
 import { imageQualityLabel } from "@/lib/image-quality";
 import { modelQuoteDescription, modelQuoteRequest } from "@/lib/model-pricing";
@@ -395,7 +395,7 @@ export function CreationComposer(props: ComposerProps) {
                 </Tooltip> : null}
 				<ModelPicker config={props.config} value={props.model} onChange={props.onModelChange} capability={props.mode} requirements={props.modelRequirements} className="creation-model-picker" placeholder={`选择${modeLabels[props.mode]}模型`} showSelectedPrice={false} showOptionPrices variant="creation" />
                 {props.mode === "video" || (props.mode === "image" && imageSettingsSupported) ? <GenerationSettingsMenu {...props} /> : null}
-                {props.mode === "video" ? <DurationMenu profile={props.videoProfile} seconds={props.seconds} onChange={props.setSeconds} /> : null}
+                {props.mode === "video" && videoDurationSupported(props.videoProfile) ? <DurationMenu profile={props.videoProfile} seconds={props.seconds} onChange={props.setSeconds} /> : null}
                 {props.mode === "text" ? <>
                     <Tooltip title={interactionBusy ? "生成中，此开关将在下次发送时生效" : (props.textStreaming ? "流式输出已开启" : "流式输出已关闭")}>
                         <button type="button" className="creation-chat-control" aria-pressed={props.textStreaming} disabled={interactionBusy} onClick={() => props.setTextStreaming(!props.textStreaming)}>

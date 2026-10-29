@@ -3,7 +3,7 @@ import { ModelPicker } from "@/components/model-picker";
 import { VideoSettingsPanel } from "@/components/video-settings-panel";
 import type { CanvasTheme } from "@/lib/canvas-theme";
 import { agentApprovalModel, agentApprovalModelSelection, agentMediaSettings, type AgentVideoApproval } from "@/lib/canvas/agent-media-approval";
-import { modelCapabilityConfigFor, normalizeVideoValue } from "@/lib/model-capabilities";
+import { modelCapabilityConfigFor, normalizeVideoValue, videoDurationSupported } from "@/lib/model-capabilities";
 import { resolveCompatibleModel, type ModelRequirements } from "@/lib/model-selection";
 import type { AgentMediaSettings } from "@/services/api/agent";
 import { PUBLIC_MODEL_CATALOG_ID, useEffectiveConfig } from "@/stores/use-config-store";
@@ -36,11 +36,12 @@ export function CanvasAgentVideoApprovalSettings({ initial, value, theme, disabl
         const profile = modelCapabilityConfigFor(config, next).video;
         if (!profile) return;
         const normalized = normalizeVideoValue(profile, { seconds: duration, ratio: settings.size, resolution: settings.quality });
+        const durationSupported = videoDurationSupported(profile);
         onChange({
             ...agentApprovalModelSelection(config, next),
             size: normalized.ratio,
             quality: normalized.resolution,
-            durationSeconds: Number(normalized.seconds),
+            durationSeconds: durationSupported && normalized.seconds !== undefined ? Number(normalized.seconds) : undefined,
             videoGenerateAudio: settings.videoGenerateAudio,
             videoWatermark: settings.videoWatermark,
             videoArkPrivateAssetUpload: settings.videoArkPrivateAssetUpload,
@@ -74,6 +75,9 @@ export function CanvasAgentVideoApprovalSettings({ initial, value, theme, disabl
         onChange({ ...agentApprovalModelSelection(config, selected), ...nextSettings });
     };
 
+    const profile = model ? modelCapabilityConfigFor(config, model).video : undefined;
+    const durationSupported = videoDurationSupported(profile);
+
     return (
         <fieldset disabled={disabled} className="min-w-0 space-y-3 border-0 p-0" data-canvas-no-zoom data-canvas-wheel-scroll aria-label="视频生成设置">
             <div className="space-y-1.5">
@@ -98,7 +102,7 @@ export function CanvasAgentVideoApprovalSettings({ initial, value, theme, disabl
             <p className="text-xs" style={{ color: theme.node.text }}>
                 本次规格：{settings.size}
                 {settings.quality ? ` · ${settings.quality}` : ""}
-                {settings.durationSeconds ? ` · ${settings.durationSeconds} 秒` : ""}
+                {durationSupported && settings.durationSeconds ? ` · ${settings.durationSeconds} 秒` : ""}
             </p>
             <p className="text-xs" style={{ color: theme.node.muted }}>
                 修改仅用于本次生成，费用按最终模型和规格计算。

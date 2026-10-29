@@ -680,11 +680,15 @@ export function imageSizeRequest(profile: ImageCapabilityConfig, value?: string)
 }
 
 export function normalizeVideoValue(profile: VideoCapabilityConfig, value: { seconds?: string; ratio?: string; resolution?: string }) {
-    const duration = profile.duration.selection === "enum" ? ((profile.duration.values || []).includes(Number(value.seconds)) ? Number(value.seconds) : profile.duration.default) : normalizeRangeDuration(profile, Number(value.seconds));
+    const duration = !videoDurationSupported(profile)
+        ? undefined
+        : profile.duration.selection === "enum"
+        ? ((profile.duration.values || []).includes(Number(value.seconds)) ? Number(value.seconds) : profile.duration.default)
+        : normalizeRangeDuration(profile, Number(value.seconds));
     const ratio = resolveVideoRatioValue(profile, value.ratio);
     // 前端状态历史上保存过 `720`，而能力配置和供应商通常使用 `720p`；统一按能力中的原始值返回，避免被误判为不支持。
     const resolution = resolveVideoResolutionValue(profile, value.resolution);
-    return { seconds: String(duration), ratio, resolution };
+    return { seconds: duration !== undefined ? String(duration) : undefined, ratio, resolution };
 }
 
 export function resolveVideoRatioValue(profile: VideoCapabilityConfig, value: string | undefined) {
@@ -725,7 +729,12 @@ function normalizeRangeDuration(profile: VideoCapabilityConfig, value: number) {
     return min + Math.min(maxStep, Math.max(0, Math.round((clamped - min) / step))) * step;
 }
 
+export function videoDurationSupported(profile?: VideoCapabilityConfig | null): boolean {
+    return profile?.durationSupported !== false;
+}
+
 export function videoDurationOptions(profile: VideoCapabilityConfig) {
+    if (!videoDurationSupported(profile)) return [];
     if (profile.duration.selection === "enum") return profile.duration.values || [];
     const min = profile.duration.min || 1;
     const max = profile.duration.max || min;
@@ -734,6 +743,7 @@ export function videoDurationOptions(profile: VideoCapabilityConfig) {
 }
 
 export function videoDurationAllowed(profile: VideoCapabilityConfig, value: number) {
+    if (!videoDurationSupported(profile)) return true;
     if (profile.duration.selection === "enum") return (profile.duration.values || []).includes(value);
     const min = profile.duration.min || 1;
     const max = profile.duration.max || min;

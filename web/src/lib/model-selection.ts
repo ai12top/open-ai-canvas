@@ -1,4 +1,4 @@
-import { defaultImageCapabilityConfig, modelCapabilityConfigFor, normalizeImageValue, normalizeVideoValue, STANDARD_IMAGE_SIZE_VALUES, videoDurationAllowed, type ImageCapabilityConfig } from "@/lib/model-capabilities";
+import { defaultImageCapabilityConfig, modelCapabilityConfigFor, normalizeImageValue, normalizeVideoValue, STANDARD_IMAGE_SIZE_VALUES, videoDurationAllowed, videoDurationSupported, type ImageCapabilityConfig } from "@/lib/model-capabilities";
 import { videoResolutionComparisonKey } from "@/lib/video-generation-options";
 import { imageParameterRequest, imageParameterDefaults, imageParameterAccepts } from "./image-parameters";
 import { imageSizePresets } from "@/lib/image-size-presets";
@@ -140,7 +140,7 @@ export function modelCompatibilityError(config: AiConfig, model: string, require
 
     if (capability === "video") {
         const profile = modelCapabilityConfigFor(config, model).video!;
-        if (requirements.videoSeconds && !videoDurationAllowed(profile, Number(requirements.videoSeconds))) return "不支持当前视频时长";
+        if (requirements.videoSeconds && videoDurationSupported(profile) && !videoDurationAllowed(profile, Number(requirements.videoSeconds))) return "不支持当前视频时长";
         if (!input) return "";
         if (visualInputCount > profile.references.maxImages) return `最多支持 ${profile.references.maxImages} 张参考图`;
         if (input.videoCount > profile.references.maxVideos) return `最多支持 ${profile.references.maxVideos} 个参考视频`;
@@ -195,8 +195,17 @@ export function modelRequestOptions(config: AiConfig, capability: ModelCapabilit
                     count: Number(config.count),
                 }
             );
-        case "video":
-            return { size: config.size, videoSeconds: Number(config.videoSeconds), vquality: config.vquality, videoGenerateAudio: config.videoGenerateAudio === "true", videoWatermark: config.videoWatermark === "true" };
+        case "video": {
+            const profile = modelCapabilityConfigFor(config, config.model || config.videoModel).video;
+            const durationSupported = videoDurationSupported(profile);
+            return {
+                size: config.size,
+                ...(durationSupported ? { videoSeconds: Number(config.videoSeconds) } : {}),
+                vquality: config.vquality,
+                videoGenerateAudio: config.videoGenerateAudio === "true",
+                videoWatermark: config.videoWatermark === "true",
+            };
+        }
         case "audio":
             return { audioVoice: config.audioVoice, audioFormat: config.audioFormat, audioSpeed: Number(config.audioSpeed), audioEmotionControlMethod: config.audioEmotionControlMethod, audioEmotionRandom: config.audioEmotionRandom === "true", audioEmotionHappy: Number(config.audioEmotionHappy), audioEmotionAngry: Number(config.audioEmotionAngry), audioEmotionSad: Number(config.audioEmotionSad), audioEmotionAfraid: Number(config.audioEmotionAfraid), audioEmotionDisgusted: Number(config.audioEmotionDisgusted), audioEmotionMelancholic: Number(config.audioEmotionMelancholic), audioEmotionSurprised: Number(config.audioEmotionSurprised), audioEmotionCalm: Number(config.audioEmotionCalm) };
         default:
@@ -374,7 +383,7 @@ export function resolveModelGenerationDefaults(
             resolution: source("vquality"),
         });
         return {
-            videoSeconds: normalized.seconds,
+            ...(normalized.seconds !== undefined ? { videoSeconds: normalized.seconds } : {}),
             size: normalized.ratio,
             vquality: normalized.resolution.replace(/p$/i, ""),
             videoGenerateAudio: source("videoGenerateAudio") ?? String(profile.video.generateAudio.default),

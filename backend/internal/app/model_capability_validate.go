@@ -174,8 +174,10 @@ func validateVideoCapabilityConfig(value *VideoCapabilityConfig) error {
 	if value.References.MaxImageBytes < 0 || value.References.MaxVideoBytes < 0 || value.References.MaxAudioBytes < 0 || value.References.MaxVideoDuration < 0 || value.References.MaxAudioDuration < 0 {
 		return BadAuthRequest("引用素材限制不能小于 0")
 	}
-	if err := validateVideoDuration(value.Duration); err != nil {
-		return err
+	if videoDurationSupported(value) {
+		if err := validateVideoDuration(value.Duration); err != nil {
+			return err
+		}
 	}
 	if len(value.Ratios) == 0 {
 		if strings.TrimSpace(value.DefaultRatio) != "" {
@@ -428,9 +430,11 @@ func validateVideoTask(profile *VideoCapabilityConfig, input canvasGenerationInp
 			return newModelCapabilityArgumentError("referenceNodeIds", "unsupported_value", BadAuthRequest("参考音频时长超过当前模型限制"))
 		}
 	}
-	seconds, err := strconv.Atoi(strings.TrimSpace(input.Config.VideoSeconds))
-	if err != nil || !videoDurationAllowed(profile.Duration, seconds) {
-		return newModelCapabilityArgumentError("durationSeconds", "unsupported_value", BadAuthRequest("视频时长不在当前模型支持范围内"))
+	if videoDurationSupported(profile) {
+		seconds, err := strconv.Atoi(strings.TrimSpace(input.Config.VideoSeconds))
+		if err != nil || !videoDurationAllowed(profile.Duration, seconds) {
+			return newModelCapabilityArgumentError("durationSeconds", "unsupported_value", BadAuthRequest("视频时长不在当前模型支持范围内"))
+		}
 	}
 	if input.Config.Size != "" && !videoRatioAllowed(profile.Ratios, input.Config.Size) {
 		return newModelCapabilityArgumentError("size", "unsupported_value", BadAuthRequest("画面比例不在当前模型支持范围内"))

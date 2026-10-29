@@ -1,9 +1,15 @@
 package app
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
+
+	"yingce/backend/internal/model"
+	"yingce/backend/internal/protocol"
 )
 
 func TestValidateImageTaskRejectsOversizedGrokPromptByUTF8Bytes(t *testing.T) {
@@ -141,6 +147,141 @@ func TestDefaultVideoCapabilityUsesProtocolSpecificResolutionTiers(t *testing.T)
 				t.Fatalf("resolutions = %v, want %v", profile.Video.Resolutions, want)
 			}
 		})
+	}
+}
+
+func TestNoDurationCapabilityIgnoresDurationInputAndOmitsProtocolOption(t *testing.T) {
+	profile := DefaultModelCapabilityConfigForModel("newapi-channel-2", "motion-control").Video
+	unsupported := false
+	profile.DurationSupported = &unsupported
+	profile.Duration = VideoDurationConfig{}
+
+	normalized, err := NormalizeModelCapabilityConfigForModel("video", "newapi-channel-2", "motion-control", &ModelCapabilityConfig{Version: 1, Video: profile})
+	if err != nil {
+		t.Fatalf("NormalizeModelCapabilityConfigForModel() error = %v", err)
+	}
+	if normalized.Video.DurationSupported == nil || *normalized.Video.DurationSupported {
+		t.Fatalf("DurationSupported = %v, want preserved false", normalized.Video.DurationSupported)
+	}
+	if !reflect.DeepEqual(normalized.Video.Duration, unsupportedVideoDuration()) {
+		t.Fatalf("inert duration = %#v, want %#v", normalized.Video.Duration, unsupportedVideoDuration())
+	}
+	for _, seconds := range []string{"", "99999"} {
+		input := canvasGenerationInput{Mode: "video", Prompt: "a clip", Config: providerConfig{VideoSeconds: seconds}}
+		if err := validateVideoTask(normalized.Video, input); err != nil {
+			t.Fatalf("validateVideoTask(videoSeconds=%q) error = %v", seconds, err)
+		}
+	}
+	spec, err := CapabilitySpecFromModelCapabilityConfig(normalized, "video")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := spec.Options["videoSeconds"]; exists {
+		t.Fatalf("unsupported duration exposed as option: %#v", spec.Options["videoSeconds"])
+	}
+
+	input := canvasGenerationInput{Mode: "video", Config: providerConfig{VideoSeconds: "99999"}, VideoCapability: normalized.Video}
+	request := protocolRequestFromInput(input)
+	if request.Duration != 0 || request.Output.Duration != 0 || request.Extra["videoSeconds"] != nil {
+		t.Fatalf("protocol request retained duration: %#v", request)
+	}
+}
+
+// 无时长保证只覆盖自有 manifest 插件；HEAD 内置协议仍按既有规则补默认秒数。
+func TestHeadBuiltinStillDefaultsDurationWhenRequestOmitsSeconds(t *testing.T) {
+	adapter, ok := protocol.Builtins().Get("newapi-channel-2")
+	if !ok {
+		t.Fatal("newapi-channel-2 adapter missing")
+	}
+	request := protocol.GenerationRequest{Model: "motion-control", Prompt: "a clip"}
+	create, err := adapter.BuildCreate(context.Background(), protocol.RequestContext{Request: request})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := create.Body.(map[string]any)
+	if body["seconds"] != "6" {
+		t.Fatalf("builtin default seconds = %#v, want \"6\"", body["seconds"])
+	}
+}
+
+func TestValidateVideoTaskStillRejectsUnsupportedDurationForOrdinaryModel(t *testing.T) {
+	profile := DefaultModelCapabilityConfigForModel("newapi-channel-2", "ordinary-video").Video
+	err := validateVideoTask(profile, canvasGenerationInput{
+		Config: providerConfig{VideoSeconds: "99999"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "视频时长不在当前模型支持范围内") {
+		t.Fatalf("validateVideoTask() error = %v, want out-of-range duration rejection", err)
+	}
+}
+
+func TestChannelCapabilityDefaultsSkipInputDrivenDuration(t *testing.T) {
+	unsupported := false
+	profile := DefaultModelCapabilityConfigForModel("newapi-channel-2", "motion-control")
+	profile.Video.DurationSupported = &unsupported
+
+	config := map[string]any{}
+	applyChannelCapabilityDefaults(config, "video", profile)
+	if value, exists := config["videoSeconds"]; exists {
+		t.Fatalf("system task default injected duration %v for input-driven model", value)
+	}
+	if config["vquality"] == nil {
+		t.Fatalf("defaults lost unrelated capabilities: %#v", config)
+	}
+
+	normal := map[string]any{}
+	applyChannelCapabilityDefaults(normal, "video", DefaultModelCapabilityConfigForModel("newapi-channel-2", "ordinary-video"))
+	if normal["videoSeconds"] == nil || strings.TrimSpace(fmt.Sprint(normal["videoSeconds"])) == "" {
+		t.Fatalf("ordinary model lost its duration default: %#v", normal)
+	}
+}
+
+func TestVideoPriceTiersCannotReintroduceInputDrivenDuration(t *testing.T) {
+	spec := CapabilitySpec{Version: 1, Capability: "video", Options: map[string]OptionConstraint{"size": {Values: []any{"16:9"}}}}
+	route := capabilitySpecWithPriceTiers(spec, model.ChannelModel{
+		Capability: "video",
+		Protocol:   model.ChannelInterfaceNewAPIChannel2,
+		PriceTiers: []model.ChannelModelPriceTier{{Resolution: "*", VideoSeconds: 30, Enabled: true, PriceConfigured: true}},
+	})
+	if _, exists := route.Options["videoSeconds"]; exists {
+		t.Fatalf("price tier turned inert duration into a user option: %#v", route.Options["videoSeconds"])
+	}
+
+	priced := capabilitySpecWithPriceTiers(CapabilitySpec{Version: 1, Capability: "video", Options: map[string]OptionConstraint{"videoSeconds": {Values: []any{5, 10}}}}, model.ChannelModel{
+		Capability: "video",
+		Protocol:   model.ChannelInterfaceNewAPIChannel2,
+		PriceTiers: []model.ChannelModelPriceTier{{Resolution: "*", VideoSeconds: 10, Enabled: true, PriceConfigured: true}},
+	})
+	if _, exists := priced.Options["videoSeconds"]; !exists {
+		t.Fatalf("priced duration option was dropped for an ordinary model: %#v", priced.Options)
+	}
+}
+
+func TestChannelModelDefaultOptionsIgnoreInertDurationTier(t *testing.T) {
+	unsupported := false
+	profile := DefaultModelCapabilityConfigForModel("newapi-channel-2", "motion-control")
+	profile.Video.DurationSupported = &unsupported
+	raw, err := json.Marshal(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	channelModel := model.ChannelModel{
+		Capability: "video", Protocol: model.ChannelInterfaceNewAPIChannel2, ModelKey: "motion-control",
+		CapabilityConfigJSON: string(raw), PriceTiers: []model.ChannelModelPriceTier{{Resolution: "*", VideoSeconds: 30, Enabled: true, PriceConfigured: true}},
+	}
+	config, err := DecodeModelCapabilityConfig(channelModel.CapabilityConfigJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := CapabilitySpecFromModelCapabilityConfig(config, "video")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaults, err := channelModelDefaultOptions(channelModel, spec)
+	if err != nil {
+		t.Fatalf("channelModelDefaultOptions() error = %v", err)
+	}
+	if value, exists := defaults["videoSeconds"]; exists {
+		t.Fatalf("channel defaults exposed inert duration %v", value)
 	}
 }
 

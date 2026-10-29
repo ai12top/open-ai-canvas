@@ -8,7 +8,7 @@ import { getMediaBlob } from "@/services/file-storage";
 import { getImageBlob } from "@/services/image-storage";
 import { resourceIdFromStorageKey, resourceStorageKey, uploadResourceFile } from "@/services/api/resources";
 import { createGenerationTask, waitForGenerationTask, type GenerationTask, type CreateTaskInput } from "@/services/api/task-center";
-import { modelCapabilityConfigFor } from "@/lib/model-capabilities";
+import { modelCapabilityConfigFor, videoDurationSupported } from "@/lib/model-capabilities";
 import { grokImagePromptLimitError } from "@/lib/grok-image-prompt-limit";
 import { resolveGenerationWorkflowExecution, type GenerationWorkflowExecution } from "@/lib/generation-workflow-execution";
 import { isArkPlanBaseUrl } from "@/lib/seedance-video";
@@ -429,6 +429,8 @@ export function backendProviderConfig(config: AiConfig, mode: BackendGenerationM
     const workflow = resolveGenerationWorkflowExecution(config, mode);
     if (!workflow && requestConfig.channelScope === "user") throw new Error("个人渠道密钥不得写入服务端任务");
     if (workflow) return workflowProviderConfig(config, requestConfig, workflow);
+    const profile = modelCapabilityConfigFor(config, requestConfig.model);
+    const durationSupported = mode === "video" ? videoDurationSupported(profile.video) : true;
     const generationOptions = {
         ...(mode === "image" ? { imageParameters: imageParameterRequest(modelCapabilityConfigFor(config, config.model).image!, config, true) } : {}),
         size: config.size,
@@ -436,7 +438,7 @@ export function backendProviderConfig(config: AiConfig, mode: BackendGenerationM
         quality: omittedImageQuality(config.quality),
         transparentBackground: config.transparentBackground,
         count: config.count,
-        videoSeconds: config.videoSeconds,
+        ...(durationSupported ? { videoSeconds: config.videoSeconds } : {}),
         vquality: config.vquality,
         videoGenerateAudio: config.videoGenerateAudio,
         videoWatermark: config.videoWatermark,
@@ -459,7 +461,7 @@ export function backendProviderConfig(config: AiConfig, mode: BackendGenerationM
         secretKey: requestConfig.secretKey,
         model: requestConfig.model,
         ...generationOptions,
-        capabilityConfig: modelCapabilityConfigFor(config, requestConfig.model),
+        capabilityConfig: profile,
         systemPrompt: config.systemPrompt,
     };
 }
@@ -514,17 +516,26 @@ function workflowPublicExecution(workflow: GenerationWorkflowExecution) {
     };
 }
 
-function logicalCapabilityOptions(config: AiConfig, mode: BackendGenerationMode) {
+export function logicalCapabilityOptions(config: AiConfig, mode: BackendGenerationMode) {
     if (mode === "image") {
         const values = imageParameterRequest(modelCapabilityConfigFor(config, config.model).image!, config, true);
         if (values) return values;
     }
     const channel = resolveModelChannel(config, config.model);
-    const spec = channel.modelCosts?.find((item) => item.model === modelOptionName(config.model))?.logicalCapabilitySpec;
+    const modelCost = channel.modelCosts?.find((item) => item.model === modelOptionName(config.model));
+    const spec = modelCost?.logicalCapabilitySpec;
+    const profile = modelCapabilityConfigFor(config, config.model);
+    const durationSupported = mode === "video" ? videoDurationSupported(profile.video) : true;
     const candidates: Record<string, unknown> = mode === "image"
         ? { size: config.size, quality: omittedImageQuality(config.quality), transparentBackground: config.transparentBackground === "true", count: Number(config.count) }
         : mode === "video"
-            ? { size: config.size, videoSeconds: Number(config.videoSeconds), vquality: config.vquality, videoGenerateAudio: config.videoGenerateAudio === "true", videoWatermark: config.videoWatermark === "true" }
+            ? {
+                size: config.size,
+                ...(durationSupported ? { videoSeconds: Number(config.videoSeconds) } : {}),
+                vquality: config.vquality,
+                videoGenerateAudio: config.videoGenerateAudio === "true",
+                videoWatermark: config.videoWatermark === "true",
+            }
             : mode === "audio"
                 ? { audioVoice: config.audioVoice, audioFormat: config.audioFormat, audioSpeed: Number(config.audioSpeed), audioLanguage: config.audioLanguage, audioDialect: config.audioDialect }
                 : {};

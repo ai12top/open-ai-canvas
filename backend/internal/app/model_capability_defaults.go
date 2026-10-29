@@ -17,6 +17,10 @@ func videoDurationSupported(value *VideoCapabilityConfig) bool {
 	return value == nil || value.DurationSupported == nil || *value.DurationSupported
 }
 
+func unsupportedVideoDuration() VideoDurationConfig {
+	return VideoDurationConfig{Selection: "range", Min: 1, Max: 1, Step: 1, Default: 1}
+}
+
 func DefaultImageCapabilityConfig(protocol string, modelName string) *ImageCapabilityConfig {
 	image := &ImageCapabilityConfig{
 		References:            ImageReferenceConfig{PromptMaxChars: 32000, MaxImages: 16, MaxImageBytes: 30 * 1024 * 1024, MaskSupported: true},
