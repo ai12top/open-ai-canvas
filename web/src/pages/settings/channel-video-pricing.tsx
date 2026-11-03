@@ -1,7 +1,7 @@
 import { PERSONAL_OPENAI_PROTOCOLS } from "@/lib/personal-channel";
 import { useEffect, useState } from "react";
-import { App, Button, Segmented, Tag } from "antd";
-import { ChevronRight, FlaskConical, Settings2 } from "lucide-react";
+import { App, Button, Checkbox, Input, Popconfirm, Segmented, Tag } from "antd";
+import { ChevronRight, FlaskConical, Search, Settings2, Trash2 } from "lucide-react";
 
 import { ModelEditorModal } from "@/components/model-editor-modal";
 import { ModelProtocolBrowser } from "@/components/model-protocol-browser";
@@ -15,14 +15,21 @@ import { modelOptionName, type ModelChannel } from "@/stores/use-config-store";
 
 type ModelCost = NonNullable<ModelChannel["modelCosts"]>[number];
 
-export function ChannelModelSettings({ channel, onChange }: { channel: ModelChannel; onChange: (costs: ModelCost[]) => void }) {
+export function ChannelModelSettings({ channel, onChange, onRemove }: { channel: ModelChannel; onChange: (costs: ModelCost[]) => void; onRemove?: (models: string[]) => void }) {
     const { message } = App.useApp();
     const [testingModel, setTestingModel] = useState("");
     const [editorTab, setEditorTab] = useState("protocol");
     const [protocolLoading, setProtocolLoading] = useState(true);
     const [protocolError, setProtocolError] = useState("");
-    const [activeModel, setActiveModel] = useState<string | null>(null);
+    const [editingModel, setActiveModel] = useState<string | null>(null);
+    const activeModel = editingModel && channel.models.includes(editingModel) ? editingModel : null;
     const [availableProtocols, setAvailableProtocols] = useState<ModelProtocolDefinition[]>([]);
+    const [modelSearch, setModelSearch] = useState("");
+    const [selectedModels, setSelectedModels] = useState<string[]>([]);
+    useEffect(() => {
+        const current = new Set(channel.models);
+        setSelectedModels((selected) => selected.filter((model) => current.has(model)));
+    }, [channel.id, channel.models]);
 
     useEffect(() => {
         let active = true;
@@ -35,6 +42,7 @@ export function ChannelModelSettings({ channel, onChange }: { channel: ModelChan
     if (!channel.models.length) return null;
 
     const updateCost = (model: string, patch: Partial<ModelCost>) => {
+        if (!channel.models.includes(model)) return;
         const defaultProtocol = defaultProtocolForModel(model, availableProtocols);
         const defaultCap = modelProtocolCapability(defaultProtocol, availableProtocols) || inferCapabilityFromModel(model);
         const current = channel.modelCosts?.find((item) => item.model === model) || {
@@ -61,6 +69,17 @@ export function ChannelModelSettings({ channel, onChange }: { channel: ModelChan
         }
     };
 
+    const query = modelSearch.trim().toLowerCase();
+    const visibleModels = channel.models.filter((model) => {
+        const cost = channel.modelCosts?.find((item) => item.model === model);
+        return !query || `${model} ${cost?.displayName || ""} ${cost?.protocol || ""}`.toLowerCase().includes(query);
+    });
+    const removeModels = (models: string[]) => {
+        if (!onRemove) return;
+        if (activeModel && models.includes(activeModel)) setActiveModel(null);
+        setSelectedModels((selected) => selected.filter((model) => !models.includes(model)));
+        onRemove(models);
+    };
     const activeModelCost = activeModel ? channel.modelCosts?.find((item) => item.model === activeModel) : undefined;
     const inferredProtocol = activeModel ? defaultProtocolForModel(activeModel, availableProtocols) : "";
     const activeProtocol = activeModelCost?.protocol || inferredProtocol;
@@ -75,8 +94,19 @@ export function ChannelModelSettings({ channel, onChange }: { channel: ModelChan
                 </div>
                 <span className="text-[var(--fs-tiny)] text-foreground/35">{channel.models.length} 个模型</span>
             </div>
-            <div className="space-y-2">
-                {channel.models.map((rawModel) => {
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+                <Input aria-label="搜索已添加模型" className="min-w-40 flex-1" allowClear prefix={<Search className="size-3.5 text-foreground/40" />} placeholder="搜索名称、ID 或协议" value={modelSearch} onChange={(event) => setModelSearch(event.target.value)} />
+                {onRemove ? <>
+                    <Button size="small" disabled={!visibleModels.length || Boolean(testingModel)} onClick={() => setSelectedModels((selected) => Array.from(new Set([...selected, ...visibleModels])))}>选择当前结果</Button>
+                    <Button size="small" disabled={!selectedModels.length} onClick={() => setSelectedModels([])}>取消选择</Button>
+                    <Popconfirm title={`从此渠道移除 ${selectedModels.length} 个模型？`} description="仅移除当前浏览器的配置，不影响系统渠道或网关。" okText="移除" cancelText="取消" disabled={!selectedModels.length || Boolean(testingModel)} onConfirm={() => removeModels(selectedModels)}>
+                        <Button size="small" danger icon={<Trash2 className="size-3.5" />} disabled={!selectedModels.length || Boolean(testingModel)}>移除所选{selectedModels.length ? ` (${selectedModels.length})` : ""}</Button>
+                    </Popconfirm>
+                </> : null}
+            </div>
+            {!visibleModels.length ? <p className="py-4 text-xs text-foreground/50">没有匹配的已添加模型，搜索不会更改配置。</p> : null}
+            <div className="max-h-[55vh] space-y-2 overflow-y-auto">
+                {visibleModels.map((rawModel) => {
                     const model = modelOptionName(rawModel);
                     const cost = channel.modelCosts?.find((item) => item.model === model);
                     const protocol = cost?.protocol || defaultProtocolForModel(model, availableProtocols);
@@ -84,6 +114,7 @@ export function ChannelModelSettings({ channel, onChange }: { channel: ModelChan
                     const displayName = cost?.displayName?.trim() || model;
                     return (
                         <div key={model} className="flex min-w-0 items-center gap-3 rounded-md bg-surface-active px-3 py-2 transition-colors hover:bg-surface-hover">
+                            {onRemove ? <Checkbox aria-label={`选择 ${model}`} disabled={Boolean(testingModel)} checked={selectedModels.includes(model)} onChange={(event) => setSelectedModels((selected) => event.target.checked ? Array.from(new Set([...selected, model])) : selected.filter((id) => id !== model))} /> : null}
                             <span className="grid size-8 shrink-0 place-items-center rounded-md bg-foreground/[.045] text-foreground/65">
                                 <Settings2 className="size-4" />
                             </span>
@@ -100,7 +131,10 @@ export function ChannelModelSettings({ channel, onChange }: { channel: ModelChan
                                     </span>
                                 </div>
                             </div>
-                            <Button type="text" size="small" icon={<ChevronRight className="size-4" />} iconPosition="end" onClick={() => { setEditorTab("protocol"); setActiveModel(model); }}>
+                            {onRemove ? <Popconfirm title="从此渠道移除该模型？" description="不影响系统渠道或网关模型。" okText="移除" cancelText="取消" disabled={Boolean(testingModel)} onConfirm={() => removeModels([model])}>
+                                <Button type="text" size="small" danger aria-label={`移除 ${model}`} icon={<Trash2 className="size-3.5" />} disabled={Boolean(testingModel)} />
+                            </Popconfirm> : null}
+                            <Button type="text" size="small" disabled={Boolean(testingModel)} icon={<ChevronRight className="size-4" />} iconPosition="end" onClick={() => { setEditorTab("protocol"); setActiveModel(model); }}>
                                 配置使用
                             </Button>
                         </div>

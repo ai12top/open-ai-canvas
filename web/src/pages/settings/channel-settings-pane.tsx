@@ -1,12 +1,13 @@
 import { App, Button, Form, Input, Popconfirm, Segmented } from "antd";
 import { AntTooltip as Tooltip } from "@/components/ui/base/tooltip/ant-tooltip";
 import { Pencil, Plus, RefreshCw, Trash2, Workflow } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { getActiveUserScope } from "@/lib/user-scope";
 
 import { ModelEditorModal } from "@/components/model-editor-modal";
 import { ChannelHeadersEditor, validateChannelHeaders } from "@/components/channel-headers-editor";
 import { WorkspaceState } from "@/components/layout/workspace-state";
-import { applyFetchedChannelModelCatalog, type ChannelModelSkip } from "@/lib/channel-model-catalog";
+import { importSelectedChannelModels, refreshConfiguredChannelModels, type ChannelModelSkip } from "@/lib/channel-model-catalog";
 import { fetchChannelModels, type ChannelModelFetchResult } from "@/services/api/image";
 import {
     channelConnectionSignature,
@@ -19,6 +20,7 @@ import {
     type ModelChannel,
 } from "@/stores/use-config-store";
 import { ChannelModelSettings } from "./channel-video-pricing";
+import { PersonalChannelModelPicker } from "./personal-channel-model-picker";
 import { Select } from "@/components/ui/base/select";
 
 type UserChannelConnection = "openai";
@@ -32,9 +34,17 @@ export function ChannelSettingsPane({ onOpenModels, onOpenRunningHub }: ChannelS
     const config = useConfigStore((state) => state.config);
     const replaceConfig = useConfigStore((state) => state.replaceConfig);
     const [loadingChannelIds, setLoadingChannelIds] = useState<string[]>([]);
+    const pendingRequests = useRef(new Set<string>());
+    const mounted = useRef(true);
+    useEffect(() => {
+        mounted.current = true;
+        return () => { mounted.current = false; };
+    }, []);
     const [editingChannelId, setEditingChannelId] = useState<string | null>(null);
     const [newChannelId, setNewChannelId] = useState<string | null>(null);
+    const [pickingChannelId, setPickingChannelId] = useState<string | null>(null);
     const userChannels = config.channels.filter((channel) => channel.scope !== "system");
+    const pickingChannel = userChannels.find((channel) => channel.id === pickingChannelId);
     const runningHubReady = Boolean(config.runningHub.enabled && config.runningHub.baseUrl.trim() && config.runningHub.apiKey.trim() && config.runningHub.workflowId.trim());
 
     const updateChannels = (channels: ModelChannel[], baseConfig = config) => {
@@ -42,16 +52,17 @@ export function ChannelSettingsPane({ onOpenModels, onOpenRunningHub }: ChannelS
     };
 
     const updateChannel = (id: string, patch: Partial<ModelChannel>) => {
-        updateChannels(config.channels.map((channel) => {
-            if (channel.id !== id) return channel;
+        const latest = useConfigStore.getState().config;
+        updateChannels(latest.channels.map((channel) => {
+            if (channel.id !== id || channel.scope === "system") return channel;
             const models = patch.models ? uniqueModels(patch.models) : channel.models;
             return {
                 ...channel,
                 ...patch,
                 models,
-                modelCosts: patch.modelCosts !== undefined ? patch.modelCosts : (patch.models ? channel.modelCosts?.filter((item) => models.includes(item.model)) : channel.modelCosts),
+                modelCosts: patch.modelCosts !== undefined ? patch.modelCosts.filter((item) => models.includes(item.model)) : (patch.models ? channel.modelCosts?.filter((item) => models.includes(item.model)) : channel.modelCosts),
             };
-        }));
+        }), latest);
     };
 
     const updateChannelConnection = (channel: ModelChannel, connection: UserChannelConnection) => {
@@ -84,10 +95,27 @@ export function ChannelSettingsPane({ onOpenModels, onOpenRunningHub }: ChannelS
     };
 
     const setChannelLoading = (id: string, loading: boolean) => {
-        setLoadingChannelIds((items) => (loading ? Array.from(new Set([...items, id])) : items.filter((item) => item !== id)));
+        if (loading) pendingRequests.current.add(id);
+        else pendingRequests.current.delete(id);
+        if (mounted.current) setLoadingChannelIds(Array.from(pendingRequests.current));
+    };
+
+    const openModelPicker = (channel: ModelChannel) => {
+        const error = channelConnectionError(channel);
+        if (error) {
+            message.error(`${channel.name || "当前渠道"}：${error}`);
+            return;
+        }
+        setPickingChannelId(channel.id);
     };
 
     const refreshChannelModels = async (channel: ModelChannel) => {
+        if (pendingRequests.current.has("all") || pendingRequests.current.has(channel.id)) return;
+        const userScope = getActiveUserScope();
+        if (!channel.models.length) {
+            message.info("尚未添加模型，请先从目录勾选或手动输入模型 ID");
+            return;
+        }
         const connectionError = channelConnectionError(channel);
         if (connectionError) {
             message.error(`${channel.name || "当前渠道"}：${connectionError}`);
@@ -96,13 +124,14 @@ export function ChannelSettingsPane({ onOpenModels, onOpenRunningHub }: ChannelS
         setChannelLoading(channel.id, true);
         try {
             const result = await fetchChannelModels(channel, true);
+            if (!mounted.current || userScope !== getActiveUserScope()) return;
             if (!result.models.length) {
                 message.warning(`${channel.name || "当前渠道"}未返回模型，已保留现有手工模型`);
                 return;
             }
             const latestConfig = useConfigStore.getState().config;
             const latestChannel = latestConfig.channels.find((item) => item.id === channel.id);
-            if (!latestChannel) return;
+            if (!latestChannel || latestChannel.scope === "system") return;
             if (channelConnectionSignature(latestChannel) !== channelConnectionSignature(channel)) {
                 message.warning(`${latestChannel.name || "当前渠道"}的连接配置已改变，已忽略旧的拉取结果`);
                 return;
@@ -114,20 +143,22 @@ export function ChannelSettingsPane({ onOpenModels, onOpenRunningHub }: ChannelS
             );
             const skipNotice = capabilitySkipNotice(latestChannel.name || "当前渠道", applied.skipped);
             if (skipNotice) message.warning(skipNotice);
-            message.success(`${latestChannel.name || "当前渠道"}模型列表已更新`);
+            if (!applied.skipped.length) message.success(`${latestChannel.name || "当前渠道"}：已检查并同步已有模型参数，未新增模型`);
         } catch (error) {
-            message.error(channelModelFetchErrorMessage(error));
+            if (mounted.current && userScope === getActiveUserScope()) message.error(channelModelFetchErrorMessage(error));
         } finally {
             setChannelLoading(channel.id, false);
         }
     };
 
     const refreshAllModels = async () => {
-        const runnable = userChannels.filter((channel) => !channelConnectionError(channel));
-        const skipped = userChannels.filter((channel) => channelConnectionError(channel));
+        if (pendingRequests.current.size) return;
+        const userScope = getActiveUserScope();
+        const runnable = userChannels.filter((channel) => channel.models.length && !channelConnectionError(channel));
+        const skipped = userChannels.filter((channel) => channel.models.length && channelConnectionError(channel));
         if (!runnable.length) {
             const detail = skipped.map((channel) => `${channel.name || "未命名渠道"}：${channelConnectionError(channel)}`).join("；");
-            message.error(detail || "没有可拉取的个人模型渠道，请先填写有效 Base URL 和 API Key");
+            message.info(detail || "没有可更新的模型，请先在个人渠道中选择添加模型并填写连接信息");
             return;
         }
         setChannelLoading("all", true);
@@ -142,10 +173,11 @@ export function ChannelSettingsPane({ onOpenModels, onOpenRunningHub }: ChannelS
                     }
                 }),
             );
+            if (!mounted.current || userScope !== getActiveUserScope()) return;
             const latestConfig = useConfigStore.getState().config;
             const successful = results.filter((item) => {
                 const latestChannel = latestConfig.channels.find((channel) => channel.id === item.channel.id);
-                return Boolean(item.result.models.length && latestChannel && channelConnectionSignature(latestChannel) === channelConnectionSignature(item.channel));
+                return Boolean(item.result.models.length && latestChannel && latestChannel.scope !== "system" && channelConnectionSignature(latestChannel) === channelConnectionSignature(item.channel));
             });
             const stale = results.filter((item) => {
                 const latestChannel = latestConfig.channels.find((channel) => channel.id === item.channel.id);
@@ -167,7 +199,7 @@ export function ChannelSettingsPane({ onOpenModels, onOpenRunningHub }: ChannelS
                     latestConfig,
                 );
                 if (skippedNotices.length) message.warning(skippedNotices.join("；"));
-                message.success(`已更新 ${successful.length} 个渠道的模型`);
+                else message.success(`已检查并同步 ${successful.length} 个渠道的已有模型参数，未新增模型`);
             }
             const warnings = [
                 ...failed.map((item) => `${item.channel.name || "未命名渠道"}：${item.error || "未返回模型"}`),
@@ -176,7 +208,7 @@ export function ChannelSettingsPane({ onOpenModels, onOpenRunningHub }: ChannelS
             ];
             if (warnings.length) message.warning(`${warnings.join("；")}。未更新的渠道已保留原有模型列表`);
         } catch (error) {
-            message.error(error instanceof Error ? error.message : "批量读取模型失败，原有模型列表未改动");
+            if (mounted.current && userScope === getActiveUserScope()) message.error(error instanceof Error ? error.message : "批量读取模型失败，原有模型列表未改动");
         } finally {
             setChannelLoading("all", false);
         }
@@ -190,7 +222,7 @@ export function ChannelSettingsPane({ onOpenModels, onOpenRunningHub }: ChannelS
                     <p>管理个人模型服务和工作流渠道。普通渠道只保存连接类型；模型能力在“模型与能力”中配置。<Button type="link" size="small" className="h-auto p-0 text-xs font-semibold" onClick={onOpenModels}>打开模型选择</Button></p>
                 </div>
                 <div className="flex w-full gap-2 sm:w-auto sm:shrink-0">
-                    <Button className="h-10 flex-1 sm:h-8 sm:flex-none" icon={<RefreshCw className="size-4" />} loading={loadingChannelIds.includes("all")} disabled={loadingChannelIds.some((id) => id !== "all")} onClick={() => void refreshAllModels()}>拉取全部</Button>
+                    <Button className="h-10 flex-1 sm:h-8 sm:flex-none" icon={<RefreshCw className="size-4" />} loading={loadingChannelIds.includes("all")} disabled={loadingChannelIds.some((id) => id !== "all")} onClick={() => void refreshAllModels()}>更新全部参数</Button>
                     <Button className="h-10 flex-1 sm:h-8 sm:flex-none" type="primary" icon={<Plus className="size-4" />} onClick={addChannel}>新增渠道</Button>
                 </div>
             </div>
@@ -226,8 +258,9 @@ export function ChannelSettingsPane({ onOpenModels, onOpenRunningHub }: ChannelS
                                             <ChannelStatus channel={channel} />
                                         </div>
                                     </div>
-                                    <div className="flex w-full justify-end gap-2 sm:w-auto sm:shrink-0">
-                                        <Button className="h-10 sm:h-8" size="small" icon={<RefreshCw className="size-3.5" />} loading={loadingChannelIds.includes(channel.id)} disabled={loadingChannelIds.includes("all")} onClick={() => void refreshChannelModels(channel)}>拉取模型</Button>
+                                    <div className="flex w-full flex-wrap justify-end gap-2 sm:w-auto sm:shrink-0">
+                                        <Button className="h-10 sm:h-8" size="small" icon={<Plus className="size-3.5" />} disabled={loadingChannelIds.includes("all") || loadingChannelIds.includes(channel.id)} onClick={() => openModelPicker(channel)}>选择添加模型</Button>
+                                        <Button className="h-10 sm:h-8" size="small" icon={<RefreshCw className="size-3.5" />} loading={loadingChannelIds.includes(channel.id)} disabled={!channel.models.length || loadingChannelIds.includes("all")} onClick={() => void refreshChannelModels(channel)}>更新已有参数</Button>
                                         <Button size="small" icon={<Pencil className="size-3.5" />} onClick={() => { setNewChannelId(null); setEditingChannelId(channel.id); }}>编辑</Button>
                                         <Popconfirm title="删除个人模型渠道？" description="该渠道关联的模型选择会同时移除。" okText="删除" cancelText="取消" okButtonProps={{ danger: true }} onConfirm={() => deleteChannel(channel.id)}>
                                             <Tooltip title="删除渠道"><Button className="size-10 p-0 sm:size-8" aria-label={`删除渠道 ${channel.name || "未命名渠道"}`} size="small" type="text" danger disabled={loadingChannelIds.includes(channel.id) || loadingChannelIds.includes("all")} icon={<Trash2 className="size-3.5" />} /></Tooltip>
@@ -243,7 +276,8 @@ export function ChannelSettingsPane({ onOpenModels, onOpenRunningHub }: ChannelS
                                         footer={<div className="model-editor-footer">
                                             <span className="text-xs text-foreground/50">更改仅保存到当前浏览器；个人请求由浏览器直连</span>
                                             <div className="model-editor-footer-actions">
-                                                <Button loading={loadingChannelIds.includes(channel.id)} onClick={() => void refreshChannelModels(channel)}>拉取模型</Button>
+                                                <Button disabled={loadingChannelIds.includes("all") || loadingChannelIds.includes(channel.id)} onClick={() => openModelPicker(channel)}>选择添加模型</Button>
+                                                <Button loading={loadingChannelIds.includes(channel.id)} disabled={!channel.models.length || loadingChannelIds.includes("all")} onClick={() => void refreshChannelModels(channel)}>更新已有参数</Button>
                                                 <Button type="primary" onClick={closeChannelEditor}>完成</Button>
                                             </div>
                                         </div>}
@@ -268,8 +302,11 @@ export function ChannelSettingsPane({ onOpenModels, onOpenRunningHub }: ChannelS
                                                     <h2>模型与能力</h2>
                                                     <p className="mt-1 text-xs text-foreground/50">维护渠道模型，并在单个模型中配置调用协议、能力和定价。</p>
                                                 </div>
-                                                <Form.Item label="模型列表" htmlFor={`channel-${channel.id}-models`} className="mb-0"><Select id={`channel-${channel.id}-models`} mode="tags" showSearch allowClear maxTagCount="responsive" tokenSeparators={[",", "\n"]} placeholder="输入模型名，或点击拉取模型" value={channel.models} onChange={(models) => updateChannel(channel.id, { models: uniqueModels(models) })} /></Form.Item>
-                                                <ChannelModelSettings channel={channel} onChange={(modelCosts) => updateChannel(channel.id, { modelCosts })} />
+                                                <Form.Item label="手动添加或编辑模型 ID" htmlFor={`channel-${channel.id}-models`} className="mb-0"><Select id={`channel-${channel.id}-models`} mode="tags" showSearch allowClear maxTagCount="responsive" tokenSeparators={[",", "\n"]} placeholder="手动输入模型 ID，或点击“选择添加模型”" value={channel.models} onChange={(models) => updateChannel(channel.id, { models: uniqueModels(models) })} /></Form.Item>
+                                                <ChannelModelSettings channel={channel} onChange={(modelCosts) => updateChannel(channel.id, { modelCosts })} onRemove={(models) => {
+                                                    const latest = useConfigStore.getState().config;
+                                                    updateChannels(latest.channels.map((item) => item.id === channel.id && item.scope !== "system" ? { ...item, models: item.models.filter((id) => !models.includes(id)), modelCosts: item.modelCosts?.filter((cost) => !models.includes(cost.model)) } : item), latest);
+                                                }} />
                                             </section>
                                         </div>
                                     </ModelEditorModal>
@@ -279,6 +316,30 @@ export function ChannelSettingsPane({ onOpenModels, onOpenRunningHub }: ChannelS
                     })}
                 </div>
             ) : <WorkspaceState icon="settings" compact title="当前没有个人模型渠道" description="管理员配置的系统渠道会出现在模型选择中；也可以添加自己的模型服务。" action={<Button icon={<Plus className="size-4" />} onClick={addChannel}>新增个人模型渠道</Button>} />}
+            {pickingChannel ? <PersonalChannelModelPicker
+                key={pickingChannel.id}
+                channel={pickingChannel}
+                onClose={() => setPickingChannelId(null)}
+                onImport={(snapshot, selectedIds) => {
+                    const latest = useConfigStore.getState().config;
+                    const channel = latest.channels.find((item) => item.id === pickingChannel.id && item.scope !== "system");
+                    if (snapshot.userScope !== getActiveUserScope() || !channel || channelConnectionSignature(channel) !== snapshot.signature) {
+                        message.warning("账号或渠道连接已改变，未添加任何模型，请重新打开目录");
+                        setPickingChannelId(null);
+                        return;
+                    }
+                    const applied = importSelectedChannelModels(channel, snapshot.catalog, selectedIds, snapshot.protocols);
+                    const count = applied.models.filter((model) => !channel.models.includes(model)).length;
+                    if (!count) {
+                        message.warning(applied.skipped.length ? `未添加模型：${applied.skipped.map((item) => `${item.model}：${item.reason}`).slice(0, 3).join("；")}` : "所选模型均已添加，配置未改动");
+                        return;
+                    }
+                    updateChannels(latest.channels.map((item) => item.id === channel.id ? { ...item, models: applied.models, modelCosts: applied.modelCosts } : item), latest);
+                    setPickingChannelId(null);
+                    message.success(`已添加 ${count} 个模型；协议和能力仍可在“配置使用”中调整`);
+                    if (applied.skipped.length) message.warning(`另有 ${applied.skipped.length} 个所选模型未添加，原有配置已保留`);
+                }}
+            /> : null}
         </Form>
     );
 }
@@ -333,7 +394,7 @@ function withChannels(config: AiConfig, channels: ModelChannel[]): AiConfig {
     const videoModels = filterModelsByCapability(models, "video", channels);
     const textModels = filterModelsByCapability(models, "text", channels);
     const audioModels = filterModelsByCapability(models, "audio", channels);
-    return { ...config, channels, models, baseUrl: channels[0]?.baseUrl || config.baseUrl, apiKey: channels[0]?.apiKey || config.apiKey, apiFormat: channels[0]?.apiFormat || config.apiFormat, imageModels, videoModels, textModels, audioModels, imageModel: normalizeDefaultModel(config.imageModel, imageModels), videoModel: normalizeDefaultModel(config.videoModel, videoModels), textModel: normalizeDefaultModel(config.textModel, textModels), audioModel: normalizeDefaultModel(config.audioModel, audioModels) };
+    return { ...config, channels, models, model: normalizeDefaultModel(config.model, models), baseUrl: channels[0]?.baseUrl || config.baseUrl, apiKey: channels[0]?.apiKey || config.apiKey, apiFormat: channels[0]?.apiFormat || config.apiFormat, imageModels, videoModels, textModels, audioModels, imageModel: normalizeDefaultModel(config.imageModel, imageModels), videoModel: normalizeDefaultModel(config.videoModel, videoModels), textModel: normalizeDefaultModel(config.textModel, textModels), audioModel: normalizeDefaultModel(config.audioModel, audioModels) };
 }
 
 function normalizeDefaultModel(value: string, options: string[]) {
@@ -350,9 +411,9 @@ function channelModelFetchErrorMessage(error: unknown) {
     return `${detail}；也可以直接在模型列表中手动输入模型名`;
 }
 
-/** 单个与批量拉取共用同一份合并逻辑：models 与 modelCosts 从同一批过滤后的候选得出。 */
+/** 单个与批量更新都以已添加模型为白名单，目录不再承担全量导入。 */
 function mergedChannelWithCatalog(channel: ModelChannel, result: ChannelModelFetchResult) {
-    const applied = applyFetchedChannelModelCatalog(channel, result.catalog, { selectedProtocol: channel.interfaceType });
+    const applied = refreshConfiguredChannelModels(channel, result.catalog);
     return {
         channel: { ...channel, models: applied.models, modelCosts: applied.modelCosts },
         skipped: applied.skipped,

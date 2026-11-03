@@ -1,6 +1,7 @@
+import { PERSONAL_OPENAI_PROTOCOLS } from "@/lib/personal-channel";
 import { applicableChannelCapability, capabilityKindOf, sanitizeChannelCapabilityConfig, sanitizeChannelCapabilityMeta, type ChannelCapabilityMeta } from "@/lib/capability-catalog";
 import { defaultModelCapabilityConfig, type ModelCapabilityConfig } from "@/lib/model-capabilities";
-import { modelProtocolCapability, protocolForModelCatalog, type ModelProtocol } from "@/lib/model-protocols";
+import { modelProtocolCapability, protocolForModelCatalog, type ModelProtocol, type ModelProtocolDefinition } from "@/lib/model-protocols";
 import type { ModelChannel } from "@/stores/use-config-store";
 
 export type ChannelModelCatalogOption = { value: string; label?: string };
@@ -143,6 +144,140 @@ export function applyFetchedChannelModelCatalog(
     return { models: Array.from(new Set(models)).sort((a, b) => a.localeCompare(b)), modelCosts, skipped };
 }
 
+export function refreshConfiguredChannelModels(channel: ModelChannel, catalog: ChannelModelCatalogItem[]): ChannelModelApplyResult {
+    const entries = uniqueCatalogEntries(catalog);
+    const byId = new Map(entries.map((item) => [item.id, item]));
+    const modelCosts = (channel.modelCosts || []).map((cost) => ({ ...cost }));
+    const costIndexes = new Map(modelCosts.map((cost, index) => [cost.model, index]));
+    const skipped: ChannelModelSkip[] = [];
+
+    for (const model of channel.models) {
+        const item = byId.get(model);
+        const costIndex = costIndexes.get(model);
+        const existing = costIndex === undefined ? undefined : modelCosts[costIndex];
+        if (!item) {
+            skipped.push({ model, reason: "网关目录未返回该模型，已保留本地配置" });
+            continue;
+        }
+        if (declaresCapabilityEntry(item)) {
+            if (!existing) {
+                skipped.push({ model, reason: "模型尚未配置请求协议，无法更新富能力参数" });
+                continue;
+            }
+            if (!existing.protocol?.trim()) {
+                skipped.push({ model, reason: "模型尚未配置请求协议，无法更新富能力参数" });
+                continue;
+            }
+            const next = mergeExistingCatalogCost(channel, item, existing, skipped);
+            if (costIndex !== undefined) modelCosts[costIndex] = next;
+            continue;
+        }
+        // Legacy 条目只更新已配置行的能力参数，绝不以目录推断改写用户协议或媒体类型。
+        if (!existing) {
+            skipped.push({ model, reason: "模型尚未配置能力，已保留本地模型名" });
+            continue;
+        }
+        if (!existing.protocol?.trim()) {
+            skipped.push({ model, reason: "模型尚未配置请求协议，无法更新目录参数" });
+            continue;
+        }
+        if (costIndex !== undefined) modelCosts[costIndex] = mergeLegacyExistingCostPreservingUser(channel, item, existing);
+    }
+
+    return { models: [...channel.models], modelCosts, skipped };
+}
+
+export function channelCatalogImportReason(item: ChannelModelCatalogItem, protocols: ModelProtocolDefinition[]): string {
+    if (!declaresCapabilityEntry(item)) return "";
+    const protocol = item.protocol?.trim() || "";
+    if (!protocol) return "目录未声明协议，无法安全添加富能力模型";
+    const kind = capabilityKindOf(item.modelType);
+    if (!kind) return item.modelType ? `目录声明的模型类型（${item.modelType}）不是图片或视频` : "目录未声明图片或视频模型类型";
+    const definition = protocols.find((candidate) => candidate.value === protocol);
+    if (!definition) return `协议 ${protocol} 未安装，无法添加该模型`;
+    if (definition.enabled === false) return `协议 ${protocol} 已禁用，无法添加该模型`;
+    if (definition.capability !== kind) return `协议能力不匹配（目录 ${kind} ≠ 插件 ${definition.capability}）`;
+    const browserExecutable = PERSONAL_OPENAI_PROTOCOLS.has(protocol) || Boolean(definition.browserManifest);
+    if (!browserExecutable) return `协议 ${protocol} 未声明可在浏览器执行，无法添加该模型`;
+    const gate = applicableChannelCapability(item, protocol);
+    return gate.applied ? "" : gate.reason;
+}
+
+export function importSelectedChannelModels(
+    channel: ModelChannel,
+    catalog: ChannelModelCatalogItem[],
+    selectedIds: string[],
+    protocols: ModelProtocolDefinition[],
+): ChannelModelApplyResult {
+    const entries = uniqueCatalogEntries(catalog);
+    const byId = new Map(entries.map((item) => [item.id, item]));
+    const models = [...channel.models];
+    const existingModels = new Set(models);
+    const modelCosts = (channel.modelCosts || []).map((cost) => ({ ...cost }));
+    const skipped: ChannelModelSkip[] = [];
+    const addModel = (id: string, cost?: ChannelModelCost) => {
+        models.push(id);
+        existingModels.add(id);
+        // 已移出 models 的旧 cost 不代表现有配置，不能抢在新配置之前被 find() 命中。
+        for (let index = modelCosts.length - 1; index >= 0; index--) {
+            if (modelCosts[index]!.model === id) modelCosts.splice(index, 1);
+        }
+        if (cost) modelCosts.push(cost);
+    };
+
+    for (const rawId of Array.from(new Set(selectedIds.map((id) => id.trim()).filter(Boolean)))) {
+        const item = byId.get(rawId);
+        if (!item) {
+            skipped.push({ model: rawId, reason: "目录中不存在该模型，未添加" });
+            continue;
+        }
+        if (existingModels.has(item.id)) {
+            skipped.push({ model: item.id, reason: "模型已添加，未修改现有配置" });
+            continue;
+        }
+        if (declaresCapabilityEntry(item)) {
+            const reason = channelCatalogImportReason(item, protocols);
+            if (reason) {
+                skipped.push({ model: item.id, reason });
+                continue;
+            }
+            const gate = applicableChannelCapability(item, item.protocol?.trim());
+            if (!gate.applied) {
+                skipped.push({ model: item.id, reason: gate.reason });
+                continue;
+            }
+            addModel(item.id, {
+                model: item.id,
+                ...(item.displayName ? { displayName: item.displayName } : {}),
+                capability: gate.kind,
+                protocol: item.protocol!.trim(),
+                billingMode: "fixed_request",
+                unitPriceMicrocredits: 0,
+                capabilityConfig: gate.config,
+            });
+            continue;
+        }
+        // Legacy 目录可按既有转换规则生成配置；如果目录信息不足，至少添加用户明确勾选的名称。
+        const legacySkipped: ChannelModelSkip[] = [];
+        const created = createCatalogCost(channel, item, undefined, legacySkipped);
+        addModel(item.id, created);
+    }
+
+    return { models, modelCosts, skipped };
+}
+
+function mergeLegacyExistingCostPreservingUser(channel: ModelChannel, item: ChannelModelCatalogItem, existing: ChannelModelCost): ChannelModelCost {
+    const capability = existing.capability;
+    const patchCapabilityConfig = hasCatalogCapabilityConfig(item) && (capability === "image" || capability === "video");
+    const capabilityConfig = patchCapabilityConfig
+        ? catalogCapabilityConfig(item, existing.protocol || channel.interfaceType, capability, existing.capabilityConfig, false)
+        : existing.capabilityConfig;
+    return {
+        ...existing,
+        ...(item.displayName ? { displayName: item.displayName } : {}),
+        ...(patchCapabilityConfig ? { capabilityConfig } : {}),
+    };
+}
 /** 兼容旧调用：只关心合并后的每模型配置时用这个。 */
 export function mergeFetchedChannelModelCosts(channel: ModelChannel, catalog: ChannelModelCatalogItem[]): ChannelModelCost[] {
     return applyFetchedChannelModelCatalog(channel, catalog).modelCosts;
